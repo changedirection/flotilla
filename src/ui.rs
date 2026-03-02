@@ -2,7 +2,7 @@ use ratatui::{
     layout::{Constraint, Direction, Flex, Layout, Rect},
     style::{Color, Style, Stylize},
     text::{Line, Span},
-    widgets::{Block, Clear, HighlightSpacing, List, ListItem, ListState, Paragraph, Tabs},
+    widgets::{Block, Clear, HighlightSpacing, List, ListItem, ListState, Paragraph, Tabs, Wrap},
     Frame,
 };
 use strum::IntoEnumIterator;
@@ -22,23 +22,38 @@ pub fn render(app: &mut App, frame: &mut Frame) {
 
     render_tabs(app, frame, chunks[0]);
     render_content(app, frame, chunks[1]);
-    render_status_bar(frame, chunks[2]);
+    render_status_bar(app, frame, chunks[2]);
     render_action_menu(app, frame);
     render_input_popup(app, frame);
+    render_help(app, frame);
 }
 
 fn render_tabs(app: &App, frame: &mut Frame, area: Rect) {
+    let loading = if app.data.loading { " ⟳" } else { "" };
     let titles = Tab::iter().map(|t| t.to_string());
     let tabs = Tabs::new(titles)
         .select(app.current_tab as usize)
         .highlight_style(Style::default().bold().fg(Color::Cyan))
         .divider(" | ")
-        .block(Block::bordered().title(" cmux-controller "));
+        .block(Block::bordered().title(format!(" cmux-controller{loading} ")));
     frame.render_widget(tabs, area);
 }
 
-fn render_status_bar(frame: &mut Frame, area: Rect) {
-    let status = Paragraph::new(" tab:switch  enter:select  space:menu  q:quit")
+fn render_status_bar(app: &App, frame: &mut Frame, area: Rect) {
+    let text = if app.show_action_menu {
+        " j/k:navigate  enter:select  esc:close"
+    } else if app.input_mode == crate::app::InputMode::BranchName {
+        " type branch name  enter:create  esc:cancel"
+    } else {
+        match app.current_tab {
+            Tab::Worktrees => " enter:switch  d:remove  p:PR  n:new  space:menu  ?:help  q:quit",
+            Tab::Prs => " enter:open  p:browser  space:menu  ?:help  q:quit",
+            Tab::Issues => " space:menu  ?:help  q:quit",
+            Tab::Sessions => " ?:help  q:quit",
+        }
+    };
+
+    let status = Paragraph::new(text)
         .style(Style::default().fg(Color::DarkGray));
     frame.render_widget(status, area);
 }
@@ -212,7 +227,7 @@ fn render_preview(app: &App, frame: &mut Frame, area: Rect) {
 
     let preview = Paragraph::new(text)
         .block(Block::bordered().title(" Preview "))
-        .wrap(ratatui::widgets::Wrap { trim: true });
+        .wrap(Wrap { trim: true });
     frame.render_widget(preview, area);
 }
 
@@ -264,6 +279,39 @@ fn render_input_popup(app: &App, frame: &mut Frame) {
     let cursor_x = inner_area.x + 2 + app.input.visual_cursor() as u16;
     let cursor_y = inner_area.y;
     frame.set_cursor_position((cursor_x, cursor_y));
+}
+
+fn render_help(app: &App, frame: &mut Frame) {
+    if !app.show_help {
+        return;
+    }
+
+    let area = popup_area(frame.area(), 60, 70);
+    frame.render_widget(Clear, area);
+
+    let help_text = vec![
+        Line::from(Span::styled("Navigation", Style::default().bold())),
+        Line::from("  j/k or ↑/↓    Navigate list"),
+        Line::from("  Tab/Shift-Tab  Switch tabs"),
+        Line::from(""),
+        Line::from(Span::styled("Actions", Style::default().bold())),
+        Line::from("  Enter          Default action (switch/open)"),
+        Line::from("  Space          Action menu"),
+        Line::from("  n              New worktree (branch input)"),
+        Line::from("  d              Remove worktree"),
+        Line::from("  p              Open PR in browser"),
+        Line::from("  r              Refresh data"),
+        Line::from(""),
+        Line::from(Span::styled("General", Style::default().bold())),
+        Line::from("  ?              Toggle this help"),
+        Line::from("  q              Quit"),
+        Line::from("  Esc            Close popup/quit"),
+    ];
+
+    let paragraph = Paragraph::new(help_text)
+        .block(Block::bordered().title(" Help "))
+        .wrap(Wrap { trim: true });
+    frame.render_widget(paragraph, area);
 }
 
 fn popup_area(area: Rect, percent_x: u16, percent_y: u16) -> Rect {

@@ -63,6 +63,7 @@ pub struct App {
     pub action_menu_index: usize,
     pub input_mode: InputMode,
     pub input: Input,
+    pub show_help: bool,
 }
 
 impl App {
@@ -81,6 +82,18 @@ impl App {
     }
 
     pub fn handle_key(&mut self, key: KeyEvent) {
+        // Help toggle works everywhere
+        if key.code == KeyCode::Char('?') {
+            self.show_help = !self.show_help;
+            return;
+        }
+        // Close help with Esc
+        if self.show_help {
+            if key.code == KeyCode::Esc {
+                self.show_help = false;
+            }
+            return;
+        }
         if self.show_action_menu {
             self.handle_menu_key(key);
             return;
