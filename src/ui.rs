@@ -24,6 +24,7 @@ pub fn render(app: &mut App, frame: &mut Frame) {
     render_content(app, frame, chunks[1]);
     render_status_bar(frame, chunks[2]);
     render_action_menu(app, frame);
+    render_input_popup(app, frame);
 }
 
 fn render_tabs(app: &App, frame: &mut Frame, area: Rect) {
@@ -238,6 +239,31 @@ fn render_action_menu(app: &mut App, frame: &mut Frame) {
     let mut state = ListState::default();
     state.select(Some(app.action_menu_index));
     frame.render_stateful_widget(list, area, &mut state);
+}
+
+fn render_input_popup(app: &App, frame: &mut Frame) {
+    if app.input_mode != crate::app::InputMode::BranchName {
+        return;
+    }
+
+    let area = popup_area(frame.area(), 50, 20);
+    frame.render_widget(Clear, area);
+
+    let inner = Block::bordered().title(" New Branch ");
+    let inner_area = inner.inner(area);
+    frame.render_widget(inner, area);
+
+    // Input line
+    let input_text = app.input.value();
+    let display = format!("> {}", input_text);
+    let paragraph = Paragraph::new(display)
+        .style(Style::default().fg(Color::Cyan));
+    frame.render_widget(paragraph, inner_area);
+
+    // Position cursor
+    let cursor_x = inner_area.x + 2 + app.input.visual_cursor() as u16;
+    let cursor_y = inner_area.y;
+    frame.set_cursor_position((cursor_x, cursor_y));
 }
 
 fn popup_area(area: Rect, percent_x: u16, percent_y: u16) -> Rect {

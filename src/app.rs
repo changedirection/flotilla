@@ -1,9 +1,18 @@
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::widgets::ListState;
 use strum::{Display, EnumIter, FromRepr, IntoEnumIterator};
+use tui_input::Input;
+use tui_input::backend::crossterm::EventHandler as InputEventHandler;
 
 use crate::data::DataStore;
 use std::path::PathBuf;
+
+#[derive(Default, PartialEq)]
+pub enum InputMode {
+    #[default]
+    Normal,
+    BranchName,
+}
 
 #[derive(Default)]
 pub enum PendingAction {
@@ -52,6 +61,8 @@ pub struct App {
     pub show_action_menu: bool,
     pub action_menu_items: Vec<String>,
     pub action_menu_index: usize,
+    pub input_mode: InputMode,
+    pub input: Input,
 }
 
 impl App {
@@ -72,6 +83,10 @@ impl App {
     pub fn handle_key(&mut self, key: KeyEvent) {
         if self.show_action_menu {
             self.handle_menu_key(key);
+            return;
+        }
+        if self.input_mode == InputMode::BranchName {
+            self.handle_input_key(key);
             return;
         }
         match key.code {
@@ -100,6 +115,10 @@ impl App {
                         _ => {}
                     }
                 }
+            }
+            KeyCode::Char('n') if self.current_tab == Tab::Worktrees => {
+                self.input_mode = InputMode::BranchName;
+                self.input.reset();
             }
             KeyCode::Char('d') if self.current_tab == Tab::Worktrees => {
                 if let Some(i) = self.list_state.selected() {
@@ -192,6 +211,26 @@ impl App {
                 self.show_action_menu = false;
             }
             _ => {}
+        }
+    }
+
+    fn handle_input_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc => {
+                self.input_mode = InputMode::Normal;
+                self.input.reset();
+            }
+            KeyCode::Enter => {
+                let branch = self.input.value().to_string();
+                if !branch.is_empty() {
+                    self.pending_action = PendingAction::CreateWorktree(branch);
+                }
+                self.input_mode = InputMode::Normal;
+                self.input.reset();
+            }
+            _ => {
+                self.input.handle_event(&crossterm::event::Event::Key(key));
+            }
         }
     }
 
