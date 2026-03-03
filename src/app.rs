@@ -5,8 +5,8 @@ use tui_input::Input;
 use tui_input::backend::crossterm::EventHandler as InputEventHandler;
 
 use crate::data::{DataStore, DeleteConfirmInfo, TableEntry, WorkItem, WorkItemKind};
-use std::collections::BTreeSet;
-use std::path::PathBuf;
+use std::collections::{BTreeSet, HashMap};
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 #[derive(Default, PartialEq)]
@@ -14,6 +14,58 @@ pub enum InputMode {
     #[default]
     Normal,
     BranchName,
+    AddRepo,
+}
+
+pub struct RepoState {
+    pub repo_root: PathBuf,
+    pub data: DataStore,
+    pub table_state: TableState,
+    pub selected_selectable_idx: Option<usize>,
+    pub has_unseen_changes: bool,
+    pub multi_selected: BTreeSet<usize>,
+}
+
+impl RepoState {
+    pub fn new(repo_root: PathBuf) -> Self {
+        Self {
+            repo_root,
+            data: DataStore::default(),
+            table_state: TableState::default(),
+            selected_selectable_idx: None,
+            has_unseen_changes: false,
+            multi_selected: BTreeSet::new(),
+        }
+    }
+
+    /// Snapshot for change detection: (worktrees, prs, sessions, branches, issues)
+    pub fn data_snapshot(&self) -> (usize, usize, usize, usize, usize) {
+        (
+            self.data.worktrees.len(),
+            self.data.prs.len(),
+            self.data.sessions.len(),
+            self.data.remote_branches.len(),
+            self.data.issues.len(),
+        )
+    }
+}
+
+pub struct DirEntry {
+    pub name: String,
+    pub is_dir: bool,
+    pub is_git_repo: bool,
+    pub is_added: bool,
+}
+
+impl Clone for DirEntry {
+    fn clone(&self) -> Self {
+        Self {
+            name: self.name.clone(),
+            is_dir: self.is_dir,
+            is_git_repo: self.is_git_repo,
+            is_added: self.is_added,
+        }
+    }
 }
 
 #[derive(Default)]
@@ -31,6 +83,7 @@ pub enum PendingAction {
     GenerateBranchName(Vec<usize>),
     /// Teleport into a web session (creates worktree + workspace as needed)
     TeleportSession { session_id: String, branch: Option<String>, worktree_idx: Option<usize> },
+    AddRepo(PathBuf),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -99,7 +152,7 @@ impl Action {
                 if item.kind != WorkItemKind::Worktree || item.is_main_worktree {
                     return;
                 }
-                if let Some(si) = app.selected_selectable_idx {
+                if let Some(si) = app.active().selected_selectable_idx {
                     app.delete_confirm_loading = true;
                     app.show_delete_confirm = true;
                     app.pending_action = PendingAction::FetchDeleteInfo(si);
@@ -118,21 +171,21 @@ impl Action {
             }
             Action::OpenPr => {
                 if let Some(pr_idx) = item.pr_idx {
-                    if let Some(pr) = app.data.prs.get(pr_idx) {
+                    if let Some(pr) = app.active().data.prs.get(pr_idx) {
                         app.pending_action = PendingAction::OpenPr(pr.number);
                     }
                 }
             }
             Action::OpenIssue => {
                 if let Some(&issue_idx) = item.issue_idxs.first() {
-                    if let Some(issue) = app.data.issues.get(issue_idx) {
+                    if let Some(issue) = app.active().data.issues.get(issue_idx) {
                         app.pending_action = PendingAction::OpenIssueBrowser(issue.number);
                     }
                 }
             }
             Action::TeleportSession => {
                 if let Some(ses_idx) = item.session_idx {
-                    if let Some(session) = app.data.sessions.get(ses_idx) {
+                    if let Some(session) = app.active().data.sessions.get(ses_idx) {
                         app.pending_action = PendingAction::TeleportSession {
                             session_id: session.id.clone(),
                             branch: item.branch.clone(),
@@ -177,9 +230,9 @@ impl Action {
 #[derive(Default)]
 pub struct App {
     pub should_quit: bool,
-    pub data: DataStore,
-    pub repo_root: PathBuf,
-    pub table_state: TableState,
+    pub repos: HashMap<PathBuf, RepoState>,
+    pub repo_order: Vec<PathBuf>,
+    pub active_repo: usize,
     pub pending_action: PendingAction,
     pub show_action_menu: bool,
     pub action_menu_items: Vec<Action>,
@@ -192,12 +245,11 @@ pub struct App {
     pub show_delete_confirm: bool,
     pub delete_confirm_info: Option<DeleteConfirmInfo>,
     pub delete_confirm_loading: bool,
-    // Track which selectable index is selected (index into data.selectable_indices)
-    selected_selectable_idx: Option<usize>,
     // Popup area for mouse hit-testing (set by UI render)
     pub menu_area: Rect,
-    // Multi-select
-    pub multi_selected: BTreeSet<usize>,
+    // Tab bar areas for mouse hit-testing (set by UI render)
+    pub tab_areas: Vec<Rect>,
+    pub add_tab_area: Rect,
     // Double-click detection
     last_click_time: Option<Instant>,
     last_click_selectable_idx: Option<usize>,
@@ -205,37 +257,104 @@ pub struct App {
     pub generating_branch: bool,
     // Transient status/error message (cleared on next action)
     pub status_message: Option<String>,
+    // File picker state
+    pub dir_entries: Vec<DirEntry>,
+    pub dir_selected: usize,
 }
 
 impl App {
-    pub fn new(repo_root: PathBuf) -> Self {
+    pub fn new(repos: Vec<PathBuf>) -> Self {
+        let mut map = HashMap::new();
+        let mut order = Vec::new();
+        for path in repos {
+            if !map.contains_key(&path) {
+                map.insert(path.clone(), RepoState::new(path.clone()));
+                order.push(path);
+            }
+        }
         Self {
-            repo_root,
+            repos: map,
+            repo_order: order,
             ..Default::default()
         }
     }
 
+    /// Reference to the active repo state.
+    pub fn active(&self) -> &RepoState {
+        &self.repos[&self.repo_order[self.active_repo]]
+    }
+
+    /// Mutable reference to the active repo state.
+    pub fn active_mut(&mut self) -> &mut RepoState {
+        let key = &self.repo_order[self.active_repo];
+        self.repos.get_mut(key).unwrap()
+    }
+
+    /// Path of the active repo.
+    pub fn active_repo_root(&self) -> &PathBuf {
+        &self.repo_order[self.active_repo]
+    }
+
+    /// Repo display name (directory basename).
+    pub fn repo_name(path: &Path) -> String {
+        path.file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| path.to_string_lossy().to_string())
+    }
+
+    pub fn add_repo(&mut self, path: PathBuf) {
+        if !self.repos.contains_key(&path) {
+            self.repos.insert(path.clone(), RepoState::new(path.clone()));
+            self.repo_order.push(path);
+        }
+    }
+
+    pub fn switch_tab(&mut self, idx: usize) {
+        if idx < self.repo_order.len() {
+            self.active_repo = idx;
+            let key = &self.repo_order[idx];
+            self.repos.get_mut(key).unwrap().has_unseen_changes = false;
+        }
+    }
+
+    pub fn next_tab(&mut self) {
+        if !self.repo_order.is_empty() {
+            self.switch_tab((self.active_repo + 1) % self.repo_order.len());
+        }
+    }
+
+    pub fn prev_tab(&mut self) {
+        if !self.repo_order.is_empty() {
+            self.switch_tab(
+                self.active_repo
+                    .checked_sub(1)
+                    .unwrap_or(self.repo_order.len() - 1),
+            );
+        }
+    }
+
     pub async fn refresh_data(&mut self) -> Vec<String> {
-        let errors = self.data.refresh(&self.repo_root).await;
+        let rs = self.active_mut();
+        let errors = rs.data.refresh(&rs.repo_root).await;
         // Restore selection or pick first
-        if self.data.selectable_indices.is_empty() {
-            self.selected_selectable_idx = None;
-            self.table_state.select(None);
-        } else if self.selected_selectable_idx.is_none() {
-            self.selected_selectable_idx = Some(0);
-            self.table_state.select(Some(self.data.selectable_indices[0]));
-        } else if let Some(si) = self.selected_selectable_idx {
-            // Clamp to bounds
-            let clamped = si.min(self.data.selectable_indices.len() - 1);
-            self.selected_selectable_idx = Some(clamped);
-            self.table_state.select(Some(self.data.selectable_indices[clamped]));
+        if rs.data.selectable_indices.is_empty() {
+            rs.selected_selectable_idx = None;
+            rs.table_state.select(None);
+        } else if rs.selected_selectable_idx.is_none() {
+            rs.selected_selectable_idx = Some(0);
+            rs.table_state.select(Some(rs.data.selectable_indices[0]));
+        } else if let Some(si) = rs.selected_selectable_idx {
+            let clamped = si.min(rs.data.selectable_indices.len() - 1);
+            rs.selected_selectable_idx = Some(clamped);
+            rs.table_state.select(Some(rs.data.selectable_indices[clamped]));
         }
         errors
     }
 
     pub fn selected_work_item(&self) -> Option<&WorkItem> {
-        let table_idx = self.table_state.selected()?;
-        match self.data.table_entries.get(table_idx)? {
+        let rs = self.active();
+        let table_idx = rs.table_state.selected()?;
+        match rs.data.table_entries.get(table_idx)? {
             TableEntry::Item(item) => Some(item),
             TableEntry::Header(_) => None,
         }
@@ -261,6 +380,10 @@ impl App {
             self.handle_menu_key(key);
             return;
         }
+        if self.input_mode == InputMode::AddRepo {
+            self.handle_add_repo_key(key);
+            return;
+        }
         if self.input_mode == InputMode::BranchName {
             self.handle_input_key(key);
             return;
@@ -268,8 +391,8 @@ impl App {
         match key.code {
             KeyCode::Char('q') => self.should_quit = true,
             KeyCode::Esc => {
-                if !self.multi_selected.is_empty() {
-                    self.multi_selected.clear();
+                if !self.active().multi_selected.is_empty() {
+                    self.active_mut().multi_selected.clear();
                 } else {
                     self.should_quit = true;
                 }
@@ -291,6 +414,20 @@ impl App {
             }
             KeyCode::Char('d') => self.dispatch_if_available(Action::RemoveWorktree),
             KeyCode::Char('p') => self.dispatch_if_available(Action::OpenPr),
+            KeyCode::Char('[') => self.prev_tab(),
+            KeyCode::Char(']') => self.next_tab(),
+            KeyCode::Char('a') => {
+                self.input_mode = InputMode::AddRepo;
+                self.input.reset();
+                // Pre-fill with parent of active repo
+                if let Some(parent) = self.active_repo_root().parent() {
+                    let parent_str = format!("{}/", parent.display());
+                    self.input = Input::from(parent_str.as_str());
+                }
+                self.dir_entries = Vec::new();
+                self.dir_selected = 0;
+                self.refresh_dir_listing();
+            }
             _ => {}
         }
     }
@@ -303,6 +440,7 @@ impl App {
         }
         if self.show_help || self.show_delete_confirm || self.generating_branch
             || self.input_mode == InputMode::BranchName
+            || self.input_mode == InputMode::AddRepo
         {
             return; // ignore mouse when other popups are open
         }
@@ -312,8 +450,9 @@ impl App {
                 if mouse.modifiers.contains(KeyModifiers::SHIFT) {
                     // Shift+Click: toggle multi-select
                     if let Some(si) = self.row_at_mouse(mouse.column, mouse.row) {
-                        self.selected_selectable_idx = Some(si);
-                        self.table_state.select(Some(self.data.selectable_indices[si]));
+                        let table_idx = self.active().data.selectable_indices[si];
+                        self.active_mut().selected_selectable_idx = Some(si);
+                        self.active_mut().table_state.select(Some(table_idx));
                         self.toggle_multi_select();
                     }
                     return;
@@ -327,8 +466,9 @@ impl App {
                         .unwrap_or(false)
                         && self.last_click_selectable_idx == Some(si);
 
-                    self.selected_selectable_idx = Some(si);
-                    self.table_state.select(Some(self.data.selectable_indices[si]));
+                    let table_idx = self.active().data.selectable_indices[si];
+                    self.active_mut().selected_selectable_idx = Some(si);
+                    self.active_mut().table_state.select(Some(table_idx));
 
                     if is_double_click {
                         self.action_enter();
@@ -342,8 +482,9 @@ impl App {
             }
             MouseEventKind::Down(MouseButton::Right) => {
                 if let Some(si) = self.row_at_mouse(mouse.column, mouse.row) {
-                    self.selected_selectable_idx = Some(si);
-                    self.table_state.select(Some(self.data.selectable_indices[si]));
+                    let table_idx = self.active().data.selectable_indices[si];
+                    self.active_mut().selected_selectable_idx = Some(si);
+                    self.active_mut().table_state.select(Some(table_idx));
                     self.open_action_menu();
                 }
             }
@@ -360,12 +501,12 @@ impl App {
         let x = mouse.column;
         let y = mouse.row;
         let a = self.menu_area;
-        // Click outside menu → close it
+        // Click outside menu -> close it
         if x < a.x || x >= a.x + a.width || y < a.y || y >= a.y + a.height {
             self.show_action_menu = false;
             return;
         }
-        // Click inside menu → select and execute
+        // Click inside menu -> select and execute
         // Account for border (1 row top)
         let row = (y - a.y) as usize;
         if row < 1 {
@@ -390,9 +531,10 @@ impl App {
                 return None;
             }
             let data_row = row_in_table - 2;
-            let offset = self.table_state.offset();
+            let offset = self.active().table_state.offset();
             let actual_row = data_row + offset;
-            self.data
+            self.active()
+                .data
                 .selectable_indices
                 .iter()
                 .position(|&idx| idx == actual_row)
@@ -402,11 +544,11 @@ impl App {
     }
 
     fn toggle_multi_select(&mut self) {
-        if let Some(si) = self.selected_selectable_idx {
-            if self.multi_selected.contains(&si) {
-                self.multi_selected.remove(&si);
+        if let Some(si) = self.active().selected_selectable_idx {
+            if self.active().multi_selected.contains(&si) {
+                self.active_mut().multi_selected.remove(&si);
             } else {
-                self.multi_selected.insert(si);
+                self.active_mut().multi_selected.insert(si);
             }
         }
     }
@@ -419,7 +561,7 @@ impl App {
 
     fn action_enter(&mut self) {
         // Multi-select flow: combine selected issues
-        if !self.multi_selected.is_empty() {
+        if !self.active().multi_selected.is_empty() {
             self.action_enter_multi_select();
             return;
         }
@@ -438,18 +580,19 @@ impl App {
 
     fn action_enter_multi_select(&mut self) {
         let mut all_issue_idxs: Vec<usize> = Vec::new();
-        for &si in &self.multi_selected {
-            if let Some(&table_idx) = self.data.selectable_indices.get(si) {
-                if let Some(TableEntry::Item(item)) = self.data.table_entries.get(table_idx) {
+        let multi_selected: BTreeSet<usize> = self.active().multi_selected.clone();
+        for &si in &multi_selected {
+            if let Some(&table_idx) = self.active().data.selectable_indices.get(si) {
+                if let Some(TableEntry::Item(item)) = self.active().data.table_entries.get(table_idx) {
                     all_issue_idxs.extend(&item.issue_idxs);
                 }
             }
         }
         // Include current selection too
-        if let Some(si) = self.selected_selectable_idx {
-            if !self.multi_selected.contains(&si) {
-                if let Some(&table_idx) = self.data.selectable_indices.get(si) {
-                    if let Some(TableEntry::Item(item)) = self.data.table_entries.get(table_idx) {
+        if let Some(si) = self.active().selected_selectable_idx {
+            if !multi_selected.contains(&si) {
+                if let Some(&table_idx) = self.active().data.selectable_indices.get(si) {
+                    if let Some(TableEntry::Item(item)) = self.active().data.table_entries.get(table_idx) {
                         all_issue_idxs.extend(&item.issue_idxs);
                     }
                 }
@@ -461,7 +604,7 @@ impl App {
             self.generating_branch = true;
             self.pending_action = PendingAction::GenerateBranchName(all_issue_idxs);
         }
-        self.multi_selected.clear();
+        self.active_mut().multi_selected.clear();
     }
 
     fn dispatch_if_available(&mut self, action: Action) {
@@ -532,6 +675,130 @@ impl App {
         }
     }
 
+    fn handle_add_repo_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc => {
+                self.input_mode = InputMode::Normal;
+                self.input.reset();
+                self.dir_entries.clear();
+            }
+            KeyCode::Down | KeyCode::Char('j') if key.modifiers.is_empty() || key.code == KeyCode::Down => {
+                if !self.dir_entries.is_empty() {
+                    self.dir_selected = (self.dir_selected + 1).min(self.dir_entries.len() - 1);
+                }
+            }
+            KeyCode::Up | KeyCode::Char('k') if key.modifiers.is_empty() || key.code == KeyCode::Up => {
+                self.dir_selected = self.dir_selected.saturating_sub(1);
+            }
+            KeyCode::Tab => {
+                // Complete selected entry into input
+                if let Some(entry) = self.dir_entries.get(self.dir_selected) {
+                    let current = self.input.value().to_string();
+                    // Find the directory prefix
+                    let base = if current.ends_with('/') {
+                        current.clone()
+                    } else {
+                        // Go up to last /
+                        current.rsplit_once('/')
+                            .map(|(prefix, _)| format!("{prefix}/"))
+                            .unwrap_or_default()
+                    };
+                    let new_path = format!("{}{}/", base, entry.name);
+                    self.input = Input::from(new_path.as_str());
+                    self.dir_selected = 0;
+                    self.refresh_dir_listing();
+                }
+            }
+            KeyCode::Enter => {
+                if let Some(entry) = self.dir_entries.get(self.dir_selected).cloned() {
+                    if entry.is_git_repo && !entry.is_added {
+                        // Add this repo
+                        let current = self.input.value().to_string();
+                        let base = if current.ends_with('/') {
+                            current
+                        } else {
+                            current.rsplit_once('/')
+                                .map(|(prefix, _)| format!("{prefix}/"))
+                                .unwrap_or_default()
+                        };
+                        let path = PathBuf::from(format!("{}{}", base, entry.name));
+                        let canonical = std::fs::canonicalize(&path).unwrap_or(path);
+                        self.pending_action = PendingAction::AddRepo(canonical);
+                        self.input_mode = InputMode::Normal;
+                        self.input.reset();
+                        self.dir_entries.clear();
+                    } else if entry.is_dir {
+                        // Descend into directory
+                        let current = self.input.value().to_string();
+                        let base = if current.ends_with('/') {
+                            current
+                        } else {
+                            current.rsplit_once('/')
+                                .map(|(prefix, _)| format!("{prefix}/"))
+                                .unwrap_or_default()
+                        };
+                        let new_path = format!("{}{}/", base, entry.name);
+                        self.input = Input::from(new_path.as_str());
+                        self.dir_selected = 0;
+                        self.refresh_dir_listing();
+                    }
+                }
+            }
+            _ => {
+                self.input.handle_event(&crossterm::event::Event::Key(key));
+                self.dir_selected = 0;
+                self.refresh_dir_listing();
+            }
+        }
+    }
+
+    pub fn refresh_dir_listing(&mut self) {
+        let path_str = self.input.value().to_string();
+        let dir = if path_str.ends_with('/') {
+            PathBuf::from(&path_str)
+        } else {
+            PathBuf::from(&path_str).parent().map(|p| p.to_path_buf()).unwrap_or_default()
+        };
+
+        let filter = if !path_str.ends_with('/') {
+            PathBuf::from(&path_str)
+                .file_name()
+                .map(|n| n.to_string_lossy().to_lowercase())
+                .unwrap_or_default()
+        } else {
+            String::new()
+        };
+
+        let mut entries = Vec::new();
+        if let Ok(read_dir) = std::fs::read_dir(&dir) {
+            for entry in read_dir.flatten() {
+                let name = entry.file_name().to_string_lossy().to_string();
+                if name.starts_with('.') {
+                    continue; // skip hidden
+                }
+                if !filter.is_empty() && !name.to_lowercase().starts_with(&filter) {
+                    continue;
+                }
+                let path = entry.path();
+                let is_dir = path.is_dir();
+                if !is_dir {
+                    continue; // only show directories
+                }
+                let is_git_repo = path.join(".git").exists();
+                let canonical = std::fs::canonicalize(&path).unwrap_or(path);
+                let is_added = self.repos.contains_key(&canonical);
+                entries.push(DirEntry {
+                    name,
+                    is_dir,
+                    is_git_repo,
+                    is_added,
+                });
+            }
+        }
+        entries.sort_by(|a, b| a.name.cmp(&b.name));
+        self.dir_entries = entries;
+    }
+
     fn handle_delete_confirm_key(&mut self, key: KeyEvent) {
         match key.code {
             KeyCode::Char('y') | KeyCode::Enter => {
@@ -563,30 +830,34 @@ impl App {
     }
 
     fn select_next(&mut self) {
-        let indices = &self.data.selectable_indices;
+        let indices = &self.active().data.selectable_indices;
         if indices.is_empty() {
             return;
         }
-        let next = match self.selected_selectable_idx {
+        let current_si = self.active().selected_selectable_idx;
+        let next = match current_si {
             Some(si) if si + 1 < indices.len() => si + 1,
             Some(si) => si, // stay at end
             None => 0,
         };
-        self.selected_selectable_idx = Some(next);
-        self.table_state.select(Some(indices[next]));
+        let table_idx = self.active().data.selectable_indices[next];
+        self.active_mut().selected_selectable_idx = Some(next);
+        self.active_mut().table_state.select(Some(table_idx));
     }
 
     fn select_prev(&mut self) {
-        let indices = &self.data.selectable_indices;
+        let indices = &self.active().data.selectable_indices;
         if indices.is_empty() {
             return;
         }
-        let prev = match self.selected_selectable_idx {
+        let current_si = self.active().selected_selectable_idx;
+        let prev = match current_si {
             Some(si) if si > 0 => si - 1,
             Some(si) => si, // stay at start
             None => 0,
         };
-        self.selected_selectable_idx = Some(prev);
-        self.table_state.select(Some(indices[prev]));
+        let table_idx = self.active().data.selectable_indices[prev];
+        self.active_mut().selected_selectable_idx = Some(prev);
+        self.active_mut().table_state.select(Some(table_idx));
     }
 }

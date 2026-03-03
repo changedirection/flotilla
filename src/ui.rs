@@ -22,26 +22,59 @@ pub fn render(app: &mut App, frame: &mut Frame) {
         ])
         .split(frame.area());
 
-    render_title_bar(app, frame, chunks[0]);
+    render_tab_bar(app, frame, chunks[0]);
     render_content(app, frame, chunks[1]);
     render_status_bar(app, frame, chunks[2]);
     render_action_menu(app, frame);
     render_input_popup(app, frame);
     render_delete_confirm(app, frame);
     render_help(app, frame);
+    render_file_picker(app, frame);
 }
 
-fn render_title_bar(app: &App, frame: &mut Frame, area: Rect) {
-    let loading = if app.data.loading { " ⟳" } else { "" };
-    let repo_name = app
-        .repo_root
-        .file_name()
-        .map(|n| n.to_string_lossy().to_string())
-        .unwrap_or_default();
-    let title = Paragraph::new(Line::from(vec![
-        Span::styled(" cmux-controller", Style::default().bold().fg(Color::Cyan)),
-        Span::styled(format!(" — {repo_name}{loading}"), Style::default().fg(Color::DarkGray)),
-    ]));
+fn render_tab_bar(app: &mut App, frame: &mut Frame, area: Rect) {
+    let mut spans: Vec<Span> = vec![
+        Span::styled(" cmux ", Style::default().bold().fg(Color::Cyan)),
+    ];
+
+    app.tab_areas.clear();
+    let mut x_offset: u16 = 6; // length of " cmux "
+
+    for (i, path) in app.repo_order.iter().enumerate() {
+        let rs = &app.repos[path];
+        let name = App::repo_name(path);
+        let is_active = i == app.active_repo;
+        let loading = if rs.data.loading { " ⟳" } else { "" };
+        let changed = if rs.has_unseen_changes { "*" } else { "" };
+
+        let sep = Span::styled(" | ", Style::default().fg(Color::DarkGray));
+        spans.push(sep);
+        x_offset += 3;
+
+        let label = format!("{name}{changed}{loading}");
+        let label_len = label.len() as u16;
+        let style = if is_active {
+            Style::default().bold().fg(Color::Cyan)
+        } else {
+            Style::default().fg(Color::DarkGray)
+        };
+        spans.push(Span::styled(label, style));
+
+        // Record tab area for mouse hit-testing
+        app.tab_areas.push(Rect::new(area.x + x_offset, area.y, label_len, 1));
+        x_offset += label_len;
+    }
+
+    // [+] button
+    let add_sep = Span::styled(" | ", Style::default().fg(Color::DarkGray));
+    spans.push(add_sep);
+    x_offset += 3;
+    let add_label = Span::styled("[+]", Style::default().fg(Color::Green));
+    spans.push(add_label);
+    app.add_tab_area = Rect::new(area.x + x_offset, area.y, 3, 1);
+
+    let line = Line::from(spans);
+    let title = Paragraph::new(line);
     frame.render_widget(title, area);
 }
 
@@ -59,9 +92,11 @@ fn render_status_bar(app: &App, frame: &mut Frame, area: Rect) {
         " j/k:navigate  enter:select  esc:close".into()
     } else if app.input_mode == crate::app::InputMode::BranchName {
         " type branch name  enter:create  esc:cancel".into()
+    } else if app.input_mode == crate::app::InputMode::AddRepo {
+        " j/k:navigate  tab:complete  enter:select  esc:cancel".into()
     } else if app.show_delete_confirm {
         " y/enter:confirm  n/esc:cancel".into()
-    } else if !app.multi_selected.is_empty() {
+    } else if !app.active().multi_selected.is_empty() {
         " enter:create branch  shift+enter:toggle  esc:clear  ?:help  q:quit".into()
     } else {
         let mut s = " enter:open".to_string();
@@ -128,24 +163,26 @@ fn render_unified_table(app: &mut App, frame: &mut Frame, area: Rect) {
     let col_areas = Layout::horizontal(&widths).split(Rect::new(0, 0, inner_width, 1));
     let col_widths: Vec<u16> = col_areas.iter().map(|r| r.width).collect();
 
-    let rows: Vec<Row> = app
+    // Build rows from active repo state (immutable borrow)
+    let active = app.active();
+    let rows: Vec<Row> = active
         .data
         .table_entries
         .iter()
         .enumerate()
         .map(|(table_idx, entry)| {
-            let is_multi_selected = app
+            let is_multi_selected = active
                 .data
                 .selectable_indices
                 .iter()
                 .position(|&idx| idx == table_idx)
-                .map(|si| app.multi_selected.contains(&si))
+                .map(|si| active.multi_selected.contains(&si))
                 .unwrap_or(false);
 
             match entry {
                 TableEntry::Header(header) => build_header_row(header),
                 TableEntry::Item(item) => {
-                    let mut row = build_item_row(item, &app.data, &col_widths);
+                    let mut row = build_item_row(item, &active.data, &col_widths);
                     if is_multi_selected {
                         row = row.style(Style::default().bg(Color::Indexed(236)));
                     }
@@ -162,7 +199,10 @@ fn render_unified_table(app: &mut App, frame: &mut Frame, area: Rect) {
         .highlight_symbol("▸ ")
         .highlight_spacing(HighlightSpacing::Always);
 
-    frame.render_stateful_widget(table, area, &mut app.table_state);
+    // Now mutably borrow for stateful render
+    let key = &app.repo_order[app.active_repo];
+    let rs = app.repos.get_mut(key).unwrap();
+    frame.render_stateful_widget(table, area, &mut rs.table_state);
 }
 
 fn build_header_row(header: &SectionHeader) -> Row<'static> {
@@ -327,7 +367,7 @@ fn render_preview(app: &App, frame: &mut Frame, area: Rect) {
 
         // Worktree info
         if let Some(wt_idx) = item.worktree_idx {
-            if let Some(wt) = app.data.worktrees.get(wt_idx) {
+            if let Some(wt) = app.active().data.worktrees.get(wt_idx) {
                 lines.push(format!("Path: {}", wt.path.display()));
                 if let Some(commit) = &wt.commit {
                     let sha = commit.short_sha.as_deref().unwrap_or("?");
@@ -352,7 +392,7 @@ fn render_preview(app: &App, frame: &mut Frame, area: Rect) {
 
         // PR info
         if let Some(pr_idx) = item.pr_idx {
-            if let Some(pr) = app.data.prs.get(pr_idx) {
+            if let Some(pr) = app.active().data.prs.get(pr_idx) {
                 lines.push(format!("PR #{}: {}", pr.number, pr.title));
                 lines.push(format!("State: {}", pr.state));
             }
@@ -360,7 +400,7 @@ fn render_preview(app: &App, frame: &mut Frame, area: Rect) {
 
         // Session info
         if let Some(ses_idx) = item.session_idx {
-            if let Some(ses) = app.data.sessions.get(ses_idx) {
+            if let Some(ses) = app.active().data.sessions.get(ses_idx) {
                 lines.push(format!("Session: {}", ses.title));
                 lines.push(format!("Status: {}", ses.session_status));
                 if !ses.session_context.model.is_empty() {
@@ -377,7 +417,7 @@ fn render_preview(app: &App, frame: &mut Frame, area: Rect) {
 
         // Workspaces
         for ws_ref in &item.workspace_refs {
-            if let Some(ws) = app.data.cmux_workspaces.iter().find(|w| &w.ws_ref == ws_ref) {
+            if let Some(ws) = app.active().data.cmux_workspaces.iter().find(|w| &w.ws_ref == ws_ref) {
                 let name = if ws.name.is_empty() { &ws.ws_ref } else { &ws.name };
                 lines.push(format!("Workspace: {}", name));
             }
@@ -385,7 +425,7 @@ fn render_preview(app: &App, frame: &mut Frame, area: Rect) {
 
         // Issues
         for &issue_idx in &item.issue_idxs {
-            if let Some(issue) = app.data.issues.get(issue_idx) {
+            if let Some(issue) = app.active().data.issues.get(issue_idx) {
                 let labels = issue
                     .labels
                     .iter()
@@ -582,6 +622,10 @@ fn render_help(app: &App, frame: &mut Frame) {
         Line::from("  Enter            Generate branch name for all selected"),
         Line::from("  Esc              Clear selection"),
         Line::from(""),
+        Line::from(Span::styled("Repos", Style::default().bold())),
+        Line::from("  [ / ]            Switch repo tab"),
+        Line::from("  a                Add repository"),
+        Line::from(""),
         Line::from(Span::styled("General", Style::default().bold())),
         Line::from("  ?                Toggle this help"),
         Line::from("  q / Esc          Quit"),
@@ -591,6 +635,69 @@ fn render_help(app: &App, frame: &mut Frame) {
         .block(Block::bordered().title(" Help "))
         .wrap(Wrap { trim: true });
     frame.render_widget(paragraph, area);
+}
+
+fn render_file_picker(app: &App, frame: &mut Frame) {
+    if app.input_mode != crate::app::InputMode::AddRepo {
+        return;
+    }
+
+    let area = popup_area(frame.area(), 60, 60);
+    frame.render_widget(Clear, area);
+
+    let block = Block::bordered().title(" Add Repository ");
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(1), Constraint::Min(0)])
+        .split(inner);
+
+    // Input line
+    let input_text = app.input.value();
+    let display = format!("> {}", input_text);
+    let paragraph = Paragraph::new(display).style(Style::default().fg(Color::Cyan));
+    frame.render_widget(paragraph, chunks[0]);
+
+    // Cursor
+    let cursor_x = chunks[0].x + 2 + app.input.visual_cursor() as u16;
+    frame.set_cursor_position((cursor_x, chunks[0].y));
+
+    // Directory listing
+    let items: Vec<ListItem> = app
+        .dir_entries
+        .iter()
+        .map(|entry| {
+            let tag = if entry.is_added {
+                " (added)"
+            } else if entry.is_git_repo {
+                " (git repo)"
+            } else if entry.is_dir {
+                "/"
+            } else {
+                ""
+            };
+            let style = if entry.is_git_repo && !entry.is_added {
+                Style::default().fg(Color::Green)
+            } else if entry.is_added {
+                Style::default().fg(Color::DarkGray)
+            } else {
+                Style::default()
+            };
+            ListItem::new(format!("  {}{}", entry.name, tag)).style(style)
+        })
+        .collect();
+
+    let list = List::new(items)
+        .highlight_style(Style::default().bg(Color::DarkGray).bold())
+        .highlight_symbol("▸ ");
+
+    let mut state = ListState::default();
+    if !app.dir_entries.is_empty() {
+        state.select(Some(app.dir_selected));
+    }
+    frame.render_stateful_widget(list, chunks[1], &mut state);
 }
 
 fn truncate(s: &str, max: usize) -> String {
