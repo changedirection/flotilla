@@ -4,6 +4,7 @@ mod data;
 mod event;
 mod template;
 mod ui;
+mod config;
 
 use std::io::stdout;
 use std::path::PathBuf;
