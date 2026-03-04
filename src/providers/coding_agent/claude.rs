@@ -2,16 +2,27 @@ use async_trait::async_trait;
 use serde::Deserialize;
 use std::process::Stdio;
 use std::sync::{LazyLock, Mutex};
+use std::time::Instant;
+use reqwest;
 
+use tracing::{info, debug, warn};
 use crate::providers::types::*;
 
 pub struct ClaudeCodingAgent {
     provider_name: String,
+    sessions_cache: Mutex<SessionsCache>,
 }
 
 impl ClaudeCodingAgent {
     pub fn new(provider_name: String) -> Self {
-        Self { provider_name }
+        Self {
+            provider_name,
+            sessions_cache: Mutex::new(SessionsCache {
+                sessions: Vec::new(),
+                fetched_at: None,
+                known_ids: std::collections::HashSet::new(),
+            }),
+        }
     }
 }
 
@@ -82,6 +93,9 @@ struct SessionOutcome {
 struct SessionGitInfo {
     #[serde(default)]
     branches: Vec<String>,
+    /// "owner/repo" slug (e.g. "changedirection/reticulate")
+    #[serde(default)]
+    repo: Option<String>,
 }
 
 impl WebSession {
@@ -93,7 +107,25 @@ impl WebSession {
             .and_then(|gi| gi.branches.first())
             .map(|s| s.as_str())
     }
+
+    fn repo_slug(&self) -> Option<&str> {
+        self.session_context
+            .outcomes
+            .first()
+            .and_then(|o| o.git_info.as_ref())
+            .and_then(|gi| gi.repo.as_deref())
+    }
 }
+
+// ---------- sessions cache ----------
+
+struct SessionsCache {
+    sessions: Vec<WebSession>,
+    fetched_at: Option<Instant>,
+    known_ids: std::collections::HashSet<String>,
+}
+
+const SESSIONS_CACHE_TTL_SECS: u64 = 30;
 
 // ---------- auth helpers ----------
 
@@ -151,28 +183,82 @@ async fn get_org_uuid(token: &str) -> Result<String, String> {
     Ok(uuid)
 }
 
+fn invalidate_auth_cache() {
+    let mut cache = AUTH_CACHE.lock().unwrap();
+    cache.token = None;
+    cache.org_uuid = None;
+}
+
 async fn read_org_uuid(token: &str) -> Result<String, String> {
-    let output = tokio::process::Command::new("curl")
-        .args([
-            "-s",
-            "-H", &format!("Authorization: Bearer {token}"),
-            "-H", "anthropic-version: 2023-06-01",
-            "https://api.anthropic.com/api/oauth/profile",
-        ])
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .output()
+    let client = reqwest::Client::new();
+    let resp = client
+        .get("https://api.anthropic.com/api/oauth/profile")
+        .bearer_auth(token)
+        .header("anthropic-version", "2023-06-01")
+        .send()
         .await
         .map_err(|e| e.to_string())?;
 
-    let body = String::from_utf8_lossy(&output.stdout).to_string();
-    let v: serde_json::Value = serde_json::from_str(&body).map_err(|e| e.to_string())?;
+    let v: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
     v.get("organization")
         .and_then(|o| o.get("uuid"))
         .and_then(|u| u.as_str())
         .map(|s| s.to_string())
         .ok_or_else(|| "No organization.uuid in profile".to_string())
+}
+
+impl ClaudeCodingAgent {
+    /// Fetch all non-archived sessions from the API, sorted by updated_at descending.
+    async fn fetch_sessions() -> Result<Vec<WebSession>, String> {
+        match Self::fetch_sessions_inner().await {
+            Ok(sessions) => Ok(sessions),
+            Err(e) if e.contains("authentication") || e.contains("missing field `data`") => {
+                warn!("session fetch failed, clearing auth cache and retrying: {e}");
+                invalidate_auth_cache();
+                Self::fetch_sessions_inner().await
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    async fn fetch_sessions_inner() -> Result<Vec<WebSession>, String> {
+        let token = get_oauth_token().await?;
+        let org_uuid = get_org_uuid(&token.access_token).await?;
+        let access_token = token.access_token;
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .get("https://api.anthropic.com/v1/sessions")
+            .bearer_auth(&access_token)
+            .header("anthropic-beta", "ccr-byoc-2025-07-29")
+            .header("anthropic-version", "2023-06-01")
+            .header("x-organization-uuid", &org_uuid)
+            .send()
+            .await
+            .map_err(|e| e.to_string())?;
+
+        let status = resp.status();
+        if status == 401 || status == 403 {
+            return Err(format!("authentication error (HTTP {status})"));
+        }
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(format!("session fetch failed (HTTP {status}): {body}"));
+        }
+
+        let resp: SessionsResponse = resp
+            .json()
+            .await
+            .map_err(|e| format!("session parse error: {e}"))?;
+
+        let mut sessions: Vec<WebSession> = resp
+            .data
+            .into_iter()
+            .filter(|s| s.session_status != "archived")
+            .collect();
+        sessions.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+        Ok(sessions)
+    }
 }
 
 // ---------- trait implementation ----------
@@ -183,39 +269,63 @@ impl super::CodingAgent for ClaudeCodingAgent {
         "Claude Sessions"
     }
 
-    async fn list_sessions(&self) -> Result<Vec<CloudAgentSession>, String> {
-        let token = get_oauth_token().await?;
-        let org_uuid = get_org_uuid(&token.access_token).await?;
-        let access_token = token.access_token;
+    async fn list_sessions(&self, criteria: &RepoCriteria) -> Result<Vec<CloudAgentSession>, String> {
+        // Check instance cache
+        let cached = {
+            let cache = self.sessions_cache.lock().unwrap();
+            if let Some(fetched_at) = cache.fetched_at {
+                if fetched_at.elapsed().as_secs() < SESSIONS_CACHE_TTL_SECS {
+                    Some(cache.sessions.clone())
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        };
 
-        let output = tokio::process::Command::new("curl")
-            .args([
-                "-s",
-                "-H", &format!("Authorization: Bearer {access_token}"),
-                "-H", "anthropic-beta: ccr-byoc-2025-07-29",
-                "-H", "anthropic-version: 2023-06-01",
-                "-H", &format!("x-organization-uuid: {org_uuid}"),
-                "https://api.anthropic.com/v1/sessions",
-            ])
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .output()
-            .await
-            .map_err(|e| e.to_string())?;
+        let sessions = if let Some(sessions) = cached {
+            debug!("Claude sessions: cache hit");
+            sessions
+        } else {
+            let fetched = Self::fetch_sessions().await?;
+            debug!("Claude sessions: fetched {} from API", fetched.len());
 
-        let body = String::from_utf8_lossy(&output.stdout).to_string();
-        let resp: SessionsResponse =
-            serde_json::from_str(&body).map_err(|e| e.to_string())?;
+            // Diff against known IDs and log additions/removals at INFO
+            let mut cache = self.sessions_cache.lock().unwrap();
+            let new_ids: std::collections::HashSet<String> =
+                fetched.iter().map(|s| s.id.clone()).collect();
+            if !cache.known_ids.is_empty() {
+                for s in &fetched {
+                    if !cache.known_ids.contains(&s.id) {
+                        info!("session appeared: {} ({})", s.title, s.id);
+                    }
+                }
+                for old_id in &cache.known_ids {
+                    if !new_ids.contains(old_id) {
+                        info!("session gone: {}", old_id);
+                    }
+                }
+            }
+            cache.known_ids = new_ids;
+            cache.sessions = fetched.clone();
+            cache.fetched_at = Some(Instant::now());
+            fetched
+        };
 
-        // Filter to non-archived sessions, sorted by updated_at descending
-        let mut sessions: Vec<WebSession> = resp
-            .data
+        // No remote slug means no cloud sessions can match this repo
+        let Some(ref slug) = criteria.repo_slug else {
+            return Ok(vec![]);
+        };
+
+        // Sessions with no repo info still match (backward compat with older sessions)
+        let filtered: Vec<WebSession> = sessions
             .into_iter()
-            .filter(|s| s.session_status != "archived")
+            .filter(|s| s.repo_slug().is_none_or(|r| r == slug))
             .collect();
-        sessions.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
 
-        Ok(sessions
+        let provider_name = &self.provider_name;
+        Ok(filtered
             .into_iter()
             .map(|s| {
                 let status = match s.session_status.as_str() {
@@ -231,7 +341,7 @@ impl super::CodingAgent for ClaudeCodingAgent {
                 };
 
                 let mut correlation_keys = vec![CorrelationKey::SessionRef(
-                    self.provider_name.clone(),
+                    provider_name.clone(),
                     s.id.clone(),
                 )];
 
@@ -257,45 +367,30 @@ impl super::CodingAgent for ClaudeCodingAgent {
     }
 
     async fn archive_session(&self, session_id: &str) -> Result<(), String> {
+        info!("archiving session {session_id}");
         let token = get_oauth_token().await?;
         let org_uuid = get_org_uuid(&token.access_token).await?;
         let access_token = token.access_token;
 
         let url = format!("https://api.anthropic.com/v1/sessions/{session_id}");
-        let output = tokio::process::Command::new("curl")
-            .args([
-                "-s",
-                "-w", "\n%{http_code}",
-                "-X", "PATCH",
-                "-H", &format!("Authorization: Bearer {access_token}"),
-                "-H", "anthropic-beta: ccr-byoc-2025-07-29",
-                "-H", "anthropic-version: 2023-06-01",
-                "-H", &format!("x-organization-uuid: {org_uuid}"),
-                "-H", "content-type: application/json",
-                "-d", r#"{"session_status":"archived"}"#,
-                &url,
-            ])
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .output()
+        let client = reqwest::Client::new();
+        let resp = client
+            .patch(&url)
+            .bearer_auth(&access_token)
+            .header("anthropic-beta", "ccr-byoc-2025-07-29")
+            .header("anthropic-version", "2023-06-01")
+            .header("x-organization-uuid", &org_uuid)
+            .json(&serde_json::json!({"session_status": "archived"}))
+            .send()
             .await
             .map_err(|e| e.to_string())?;
 
-        let body = String::from_utf8_lossy(&output.stdout).to_string();
-        let status_code: u16 = body
-            .lines()
-            .last()
-            .and_then(|s| s.trim().parse().ok())
-            .unwrap_or(0);
-
-        if (200..300).contains(&status_code) {
+        if resp.status().is_success() {
             Ok(())
         } else {
-            Err(format!(
-                "archive session failed (HTTP {}): {}",
-                status_code,
-                body.lines().next().unwrap_or("")
-            ))
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            Err(format!("archive session failed (HTTP {status}): {body}"))
         }
     }
 
