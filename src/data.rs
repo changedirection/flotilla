@@ -164,8 +164,14 @@ impl DataStore {
             }
         };
 
-        // Merged branches - still direct (not in trait)
-        let merged_fut = fetch_merged_pr_branches(repo_root);
+        // Merged branches through registry
+        let merged_fut = async {
+            if let Some(cr) = registry.code_review.values().next() {
+                cr.list_merged_branch_names(repo_root.as_path(), 50).await
+            } else {
+                Ok(vec![])
+            }
+        };
 
         // Workspaces through registry
         let ws_fut = async {
@@ -448,19 +454,6 @@ async fn fetch_worktrees(repo_root: &PathBuf) -> Result<Vec<Worktree>, String> {
     // wt may append ANSI escape codes after the JSON; strip them
     let json_end = output.rfind(']').map(|i| i + 1).unwrap_or(output.len());
     serde_json::from_str(&output[..json_end]).map_err(|e| e.to_string())
-}
-
-async fn fetch_merged_pr_branches(repo_root: &PathBuf) -> Result<Vec<String>, String> {
-    let output = run_command(
-        "gh",
-        &["pr", "list", "--state", "merged", "--limit", "50", "--json", "headRefName"],
-        Some(repo_root),
-    ).await?;
-    let prs: Vec<serde_json::Value> = serde_json::from_str(&output).map_err(|e| e.to_string())?;
-    Ok(prs
-        .iter()
-        .filter_map(|p| p.get("headRefName").and_then(|v| v.as_str()).map(|s| s.to_string()))
-        .collect())
 }
 
 #[derive(Debug, Clone, Default)]

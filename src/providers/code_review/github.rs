@@ -171,4 +171,28 @@ impl super::CodeReview for GitHubCodeReview {
             .await?;
         Ok(())
     }
+
+    async fn list_merged_branch_names(
+        &self,
+        repo_root: &Path,
+        limit: usize,
+    ) -> Result<Vec<String>, String> {
+        let limit_str = limit.to_string();
+        let output = self
+            .run_cmd(
+                "gh",
+                &[
+                    "pr", "list", "--state", "merged", "--limit", &limit_str,
+                    "--json", "headRefName",
+                ],
+                repo_root,
+            )
+            .await?;
+        let prs: Vec<serde_json::Value> =
+            serde_json::from_str(&output).map_err(|e| e.to_string())?;
+        Ok(prs
+            .iter()
+            .filter_map(|p| p.get("headRefName").and_then(|v| v.as_str()).map(|s| s.to_string()))
+            .collect())
+    }
 }
