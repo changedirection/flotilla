@@ -1,6 +1,26 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
+
+use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
 use tokio::process::Command;
 use tracing::info;
+
+use crate::providers::types::*;
+#[allow(unused_imports)]
+use crate::template::WorkspaceTemplate;
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct ZellijState {
+    #[serde(default)]
+    tabs: HashMap<String, TabState>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct TabState {
+    working_directory: String,
+    created_at: String,
+}
 
 pub struct ZellijWorkspaceManager;
 
@@ -91,5 +111,83 @@ impl ZellijWorkspaceManager {
             .join("zellij")
             .join(session)
             .join("state.toml"))
+    }
+
+    /// Load persisted state for the given session. Returns default on any error.
+    fn load_state(session: &str) -> ZellijState {
+        let path = match Self::state_path(session) {
+            Ok(p) => p,
+            Err(_) => return ZellijState::default(),
+        };
+        let contents = match std::fs::read_to_string(&path) {
+            Ok(c) => c,
+            Err(_) => return ZellijState::default(),
+        };
+        toml::from_str(&contents).unwrap_or_default()
+    }
+
+    /// Save state for the given session. Silently ignores errors.
+    #[allow(dead_code)]
+    fn save_state(session: &str, state: &ZellijState) {
+        let path = match Self::state_path(session) {
+            Ok(p) => p,
+            Err(_) => return,
+        };
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        if let Ok(contents) = toml::to_string(state) {
+            let _ = std::fs::write(&path, contents);
+        }
+    }
+}
+
+#[async_trait]
+impl super::WorkspaceManager for ZellijWorkspaceManager {
+    fn display_name(&self) -> &str {
+        "zellij Workspaces"
+    }
+
+    async fn list_workspaces(&self) -> Result<Vec<Workspace>, String> {
+        let output = Self::zellij_action(&["query-tab-names"]).await?;
+        let tab_names: Vec<&str> = output.lines().filter(|l| !l.is_empty()).collect();
+
+        // Try to load state for enrichment
+        let state = Self::session_name()
+            .map(|s| Self::load_state(&s))
+            .unwrap_or_default();
+
+        let workspaces = tab_names
+            .into_iter()
+            .map(|name| {
+                let mut directories = Vec::new();
+                let mut correlation_keys = Vec::new();
+
+                if let Some(tab) = state.tabs.get(name) {
+                    let path = PathBuf::from(&tab.working_directory);
+                    correlation_keys.push(CorrelationKey::CheckoutPath(path.clone()));
+                    directories.push(path);
+                }
+
+                Workspace {
+                    ws_ref: name.to_string(),
+                    name: name.to_string(),
+                    directories,
+                    correlation_keys,
+                }
+            })
+            .collect();
+
+        Ok(workspaces)
+    }
+
+    async fn create_workspace(&self, _config: &WorkspaceConfig) -> Result<Workspace, String> {
+        todo!()
+    }
+
+    async fn select_workspace(&self, ws_ref: &str) -> Result<(), String> {
+        info!("zellij: switching to tab '{ws_ref}'");
+        Self::zellij_action(&["go-to-tab-name", ws_ref]).await?;
+        Ok(())
     }
 }
