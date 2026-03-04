@@ -109,6 +109,10 @@ impl super::CheckoutManager for WtCheckoutManager {
         "wt"
     }
 
+    fn section_label(&self) -> &str { "Worktrees" }
+    fn item_noun(&self) -> &str { "worktree" }
+    fn abbreviation(&self) -> &str { "WT" }
+
     async fn list_checkouts(&self, repo_root: &Path) -> Result<Vec<Checkout>, String> {
         let output = run_cmd("wt", &["list", "--format=json"], repo_root)
             .await?;
