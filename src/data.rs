@@ -29,24 +29,12 @@ pub enum WorkItemKind {
     Issue,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum SectionHeader {
-    Checkouts,
-    Sessions,
-    PullRequests,
-    RemoteBranches,
-    Issues,
-}
+#[derive(Debug, Clone)]
+pub struct SectionHeader(pub String);
 
 impl fmt::Display for SectionHeader {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            SectionHeader::Checkouts => write!(f, "Worktrees"),
-            SectionHeader::Sessions => write!(f, "Sessions"),
-            SectionHeader::PullRequests => write!(f, "Pull Requests"),
-            SectionHeader::RemoteBranches => write!(f, "Remote Branches"),
-            SectionHeader::Issues => write!(f, "Issues"),
-        }
+        write!(f, "{}", self.0)
     }
 }
 
@@ -88,6 +76,24 @@ pub struct DataStore {
     /// Per-provider-kind health, set during refresh.
     /// Keys: "coding_agent", "code_review", "issue_tracker"
     pub provider_health: HashMap<&'static str, bool>,
+}
+
+pub struct SectionLabels {
+    pub checkouts: String,
+    pub code_review: String,
+    pub issues: String,
+    pub sessions: String,
+}
+
+impl Default for SectionLabels {
+    fn default() -> Self {
+        Self {
+            checkouts: "Checkouts".into(),
+            code_review: "Change Requests".into(),
+            issues: "Issues".into(),
+            sessions: "Sessions".into(),
+        }
+    }
 }
 
 impl DataStore {
@@ -181,7 +187,21 @@ impl DataStore {
             self.provider_health.insert("issue_tracker", !errors.iter().any(|e| e.category == "issues"));
         }
 
-        self.correlate();
+        let section_labels = SectionLabels {
+            checkouts: registry.checkout_managers.values().next()
+                .map(|cm| cm.section_label().to_string())
+                .unwrap_or_else(|| "Checkouts".into()),
+            code_review: registry.code_review.values().next()
+                .map(|cr| cr.section_label().to_string())
+                .unwrap_or_else(|| "Change Requests".into()),
+            issues: registry.issue_trackers.values().next()
+                .map(|it| it.section_label().to_string())
+                .unwrap_or_else(|| "Issues".into()),
+            sessions: registry.coding_agents.values().next()
+                .map(|ca| ca.section_label().to_string())
+                .unwrap_or_else(|| "Sessions".into()),
+        };
+        self.correlate(&section_labels);
         self.loading = false;
         errors
     }
@@ -264,7 +284,7 @@ impl DataStore {
         })
     }
 
-    fn correlate(&mut self) {
+    fn correlate(&mut self, labels: &SectionLabels) {
         // Phase 1: Build CorrelatedItems from identity-keyed sources.
         // IssueRef keys are excluded — they are association keys, not identity
         // keys. Two PRs referencing the same issue are separate work units.
@@ -360,7 +380,7 @@ impl DataStore {
         // Checkouts section -- sorted by branch name ascending
         checkout_items.sort_by(|a, b| a.branch.cmp(&b.branch));
         if !checkout_items.is_empty() {
-            entries.push(TableEntry::Header(SectionHeader::Checkouts));
+            entries.push(TableEntry::Header(SectionHeader(labels.checkouts.clone())));
             for item in checkout_items {
                 selectable.push(entries.len());
                 entries.push(TableEntry::Item(item));
@@ -374,7 +394,7 @@ impl DataStore {
             b_time.cmp(&a_time) // descending
         });
         if !session_items.is_empty() {
-            entries.push(TableEntry::Header(SectionHeader::Sessions));
+            entries.push(TableEntry::Header(SectionHeader(labels.sessions.clone())));
             for item in session_items {
                 selectable.push(entries.len());
                 entries.push(TableEntry::Item(item));
@@ -388,7 +408,7 @@ impl DataStore {
             b_num.cmp(&a_num) // descending
         });
         if !pr_items.is_empty() {
-            entries.push(TableEntry::Header(SectionHeader::PullRequests));
+            entries.push(TableEntry::Header(SectionHeader(labels.code_review.clone())));
             for item in pr_items {
                 selectable.push(entries.len());
                 entries.push(TableEntry::Item(item));
@@ -431,7 +451,7 @@ impl DataStore {
             .collect();
         remote_items.sort_by(|a, b| a.branch.cmp(&b.branch));
         if !remote_items.is_empty() {
-            entries.push(TableEntry::Header(SectionHeader::RemoteBranches));
+            entries.push(TableEntry::Header(SectionHeader("Remote Branches".into())));
             for item in remote_items {
                 selectable.push(entries.len());
                 entries.push(TableEntry::Item(item));
@@ -461,7 +481,7 @@ impl DataStore {
             b_num.cmp(&a_num) // descending
         });
         if !issue_items.is_empty() {
-            entries.push(TableEntry::Header(SectionHeader::Issues));
+            entries.push(TableEntry::Header(SectionHeader(labels.issues.clone())));
             for item in issue_items {
                 selectable.push(entries.len());
                 entries.push(TableEntry::Item(item));
