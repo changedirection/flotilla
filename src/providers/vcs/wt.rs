@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 use async_trait::async_trait;
 use serde::Deserialize;
+use tracing::info;
 use crate::providers::types::*;
 
 pub struct WtCheckoutManager;
@@ -125,6 +126,7 @@ impl super::CheckoutManager for WtCheckoutManager {
         repo_root: &Path,
         branch: &str,
     ) -> Result<Checkout, String> {
+        info!("wt: creating worktree for {branch}");
         // Create the worktree via `wt switch --create <branch> --no-cd`
         run_cmd(
             "wt",
@@ -142,6 +144,7 @@ impl super::CheckoutManager for WtCheckoutManager {
 
         for wt in worktrees {
             if wt.branch == branch || wt.branch.ends_with(branch) {
+                info!("wt: created {branch} at {}", wt.path.display());
                 return Ok(wt.into_checkout());
             }
         }
@@ -154,6 +157,7 @@ impl super::CheckoutManager for WtCheckoutManager {
         repo_root: &Path,
         branch: &str,
     ) -> Result<(), String> {
+        info!("wt: removing worktree {branch}");
         run_cmd("wt", &["remove", branch], repo_root).await?;
         Ok(())
     }

@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use indexmap::IndexMap;
 use crate::providers::ai_utility::AiUtility;
 use crate::providers::code_review::CodeReview;
@@ -11,7 +12,7 @@ pub struct ProviderRegistry {
     pub checkout_managers: IndexMap<String, Box<dyn CheckoutManager>>,
     pub code_review: IndexMap<String, Box<dyn CodeReview>>,
     pub issue_trackers: IndexMap<String, Box<dyn IssueTracker>>,
-    pub coding_agents: IndexMap<String, Box<dyn CodingAgent>>,
+    pub coding_agents: IndexMap<String, Arc<dyn CodingAgent>>,
     pub ai_utilities: IndexMap<String, Box<dyn AiUtility>>,
     pub workspace_manager: Option<(String, Box<dyn WorkspaceManager>)>,
 }

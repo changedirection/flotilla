@@ -1,6 +1,13 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+/// Criteria passed to coding agents so they can filter results to a specific repo.
+#[derive(Debug, Clone, Default)]
+pub struct RepoCriteria {
+    /// "owner/repo" from git remote (e.g. "changedirection/reticulate")
+    pub repo_slug: Option<String>,
+}
+
 /// Identity keys — safe for union-find grouping. Items sharing a
 /// CorrelationKey are the same work unit.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]

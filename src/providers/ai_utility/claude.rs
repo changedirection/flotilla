@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 use tokio::process::Command;
+use tracing::info;
 
 pub struct ClaudeAiUtility;
 
@@ -22,6 +23,7 @@ impl super::AiUtility for ClaudeAiUtility {
     }
 
     async fn generate_branch_name(&self, context: &str) -> Result<String, String> {
+        info!("ai: generating branch name");
         let prompt = format!(
             "Suggest a short git branch name for this context. \
              Output ONLY the branch name, nothing else. Use kebab-case: {context}"
@@ -38,6 +40,7 @@ impl super::AiUtility for ClaudeAiUtility {
             if branch.is_empty() {
                 Err("claude returned empty output".to_string())
             } else {
+                info!("ai: suggested '{branch}'");
                 Ok(branch)
             }
         } else {

@@ -2,6 +2,7 @@ use async_trait::async_trait;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use tokio::process::Command;
+use tracing::info;
 
 use crate::providers::types::*;
 use crate::template::WorkspaceTemplate;
@@ -95,6 +96,7 @@ impl super::WorkspaceManager for CmuxWorkspaceManager {
     }
 
     async fn create_workspace(&self, config: &WorkspaceConfig) -> Result<Workspace, String> {
+        info!("cmux: creating workspace '{}'", config.name);
         // Parse template from YAML if provided, otherwise use default
         let template = if let Some(ref yaml) = config.template_yaml {
             serde_yaml::from_str::<WorkspaceTemplate>(yaml)
@@ -268,6 +270,7 @@ impl super::WorkspaceManager for CmuxWorkspaceManager {
             .map(|d| CorrelationKey::CheckoutPath(d.clone()))
             .collect();
 
+        info!("cmux: workspace '{}' ready ({ws_ref})", config.name);
         Ok(Workspace {
             ws_ref,
             name: config.name.clone(),
@@ -277,6 +280,7 @@ impl super::WorkspaceManager for CmuxWorkspaceManager {
     }
 
     async fn select_workspace(&self, ws_ref: &str) -> Result<(), String> {
+        info!("cmux: switching to workspace {ws_ref}");
         Self::cmux_cmd(&["select-workspace", "--workspace", ws_ref]).await?;
         Ok(())
     }

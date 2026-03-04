@@ -46,7 +46,13 @@ impl super::Vcs for GitVcs {
     }
 
     async fn list_remote_branches(&self, repo_root: &Path) -> Result<Vec<String>, String> {
-        let output = run_cmd("git", &["ls-remote", "--heads", "origin"], repo_root)
+        // Check if any remote exists; return empty if not (local-only repo).
+        let remotes = run_cmd("git", &["remote"], repo_root).await.unwrap_or_default();
+        if remotes.trim().is_empty() {
+            return Ok(vec![]);
+        }
+        let remote = remotes.lines().next().unwrap_or("origin");
+        let output = run_cmd("git", &["ls-remote", "--heads", remote], repo_root)
             .await?;
         // Output format: "<sha>\trefs/heads/<branch>"
         Ok(output
