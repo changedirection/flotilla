@@ -1,7 +1,7 @@
 use std::path::Path;
 use std::process::Stdio;
 
-use super::command_exists;
+use super::{command_exists, resolve_claude_path};
 use crate::providers::ai_utility::claude::ClaudeAiUtility;
 use crate::providers::code_review::github::GitHubCodeReview;
 use crate::providers::coding_agent::claude::ClaudeCodingAgent;
@@ -17,6 +17,7 @@ fn detect_remote_host(repo_root: &Path) -> Option<String> {
     let output = std::process::Command::new("git")
         .args(["remote", "get-url", "origin"])
         .current_dir(repo_root)
+        .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .output()
@@ -80,14 +81,12 @@ pub fn detect_providers(repo_root: &Path) -> ProviderRegistry {
         // TODO: GitLab support
     }
 
-    // 4. Coding agent: claude
-    if command_exists("claude", &["--version"]) {
+    // 4. Coding agent & AI utility: claude
+    if resolve_claude_path().is_some() {
         registry.coding_agents.insert(
             "claude".to_string(),
             Box::new(ClaudeCodingAgent::new("claude".to_string())),
         );
-
-        // 5. AI utility: claude (same binary check)
         registry
             .ai_utilities
             .insert("claude".to_string(), Box::new(ClaudeAiUtility::new()));
