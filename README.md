@@ -1,4 +1,4 @@
-# cmux-controller
+# flotilla
 
 TUI dashboard for managing development workspaces across cmux, git worktrees, and GitHub.
 
@@ -78,7 +78,7 @@ Data auto-refreshes every 10 seconds. Press `r` to refresh manually.
 
 ## Workspace template
 
-Place a `.cmux/workspace.yaml` in your repo root to define the pane layout for new workspaces.
+Place a `.flotilla/workspace.yaml` in your repo root to define the pane layout for new workspaces.
 
 ### Format
 
