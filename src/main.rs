@@ -279,14 +279,14 @@ fn resolve_repo_roots(cli_roots: &[PathBuf]) -> Vec<PathBuf> {
         }
     }
 
-    // 3. Auto-detect from cwd if nothing found yet
-    if repo_roots.is_empty() {
-        let output = std::process::Command::new("git")
-            .args(["rev-parse", "--show-toplevel"])
-            .output();
-        if let Ok(output) = output {
-            if output.status.success() {
-                let path = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
+    // 3. Auto-detect from cwd — always include if it's a git repo
+    let output = std::process::Command::new("git")
+        .args(["rev-parse", "--show-toplevel"])
+        .output();
+    if let Ok(output) = output {
+        if output.status.success() {
+            let path = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
+            if !repo_roots.contains(&path) {
                 repo_roots.push(path);
             }
         }
