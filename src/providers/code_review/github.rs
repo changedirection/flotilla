@@ -61,19 +61,20 @@ impl GitHubCodeReview {
 
     fn gh_pr_to_change_request(&self, pr: &GhPr) -> ChangeRequest {
         let id = pr.number.to_string();
-        let mut correlation_keys = vec![
+        let correlation_keys = vec![
             CorrelationKey::Branch(pr.head_ref_name.clone()),
             CorrelationKey::ChangeRequestRef(self.provider_name.clone(), id.clone()),
         ];
 
-        // Parse linked issues from title and body
+        // Parse linked issues from title and body → association keys
+        let mut association_keys: Vec<AssociationKey> = Vec::new();
         let texts = [pr.title.as_str(), pr.body.as_deref().unwrap_or("")];
         for text in texts {
             for issue_num in Self::parse_linked_issues(text) {
                 let key =
-                    CorrelationKey::IssueRef(self.provider_name.clone(), issue_num);
-                if !correlation_keys.contains(&key) {
-                    correlation_keys.push(key);
+                    AssociationKey::IssueRef(self.provider_name.clone(), issue_num);
+                if !association_keys.contains(&key) {
+                    association_keys.push(key);
                 }
             }
         }
@@ -85,6 +86,7 @@ impl GitHubCodeReview {
             status: Self::parse_state(&pr.state),
             body: pr.body.clone(),
             correlation_keys,
+            association_keys,
         }
     }
 }

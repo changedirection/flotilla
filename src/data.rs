@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use crate::providers::correlation::{self, CorrelatedItem, CorrelatedGroup, ItemKind as CorItemKind};
 use crate::providers::types::{
-    ChangeRequest, Checkout, CloudAgentSession, CorrelationKey, Issue, Workspace,
+    AssociationKey, ChangeRequest, Checkout, CloudAgentSession, Issue, Workspace,
 };
 use crate::providers::registry::ProviderRegistry;
 
@@ -185,7 +185,6 @@ impl DataStore {
                         workspace_refs.push(ws.ws_ref.clone());
                     }
                 }
-                _ => {}
             }
         }
 
@@ -230,22 +229,15 @@ impl DataStore {
         // Phase 1: Build CorrelatedItems from identity-keyed sources.
         // IssueRef keys are excluded — they are association keys, not identity
         // keys. Two PRs referencing the same issue are separate work units.
-        // Issues are linked post-correlation via IssueRef on change requests.
+        // Issues are linked post-correlation via AssociationKey::IssueRef.
         let mut items: Vec<CorrelatedItem> = Vec::new();
-
-        let strip_issue_refs = |keys: &[CorrelationKey]| -> Vec<CorrelationKey> {
-            keys.iter()
-                .filter(|k| !matches!(k, CorrelationKey::IssueRef(_, _)))
-                .cloned()
-                .collect()
-        };
 
         for (i, co) in self.checkouts.iter().enumerate() {
             items.push(CorrelatedItem {
                 provider_name: "checkout".to_string(),
                 kind: CorItemKind::Checkout,
                 title: co.branch.clone(),
-                correlation_keys: strip_issue_refs(&co.correlation_keys),
+                correlation_keys: co.correlation_keys.clone(),
                 source_index: i,
             });
         }
@@ -255,20 +247,20 @@ impl DataStore {
                 provider_name: "change_request".to_string(),
                 kind: CorItemKind::ChangeRequest,
                 title: cr.title.clone(),
-                correlation_keys: strip_issue_refs(&cr.correlation_keys),
+                correlation_keys: cr.correlation_keys.clone(),
                 source_index: i,
             });
         }
 
         // Issues are NOT submitted to the correlation engine — they link
-        // only via IssueRef, which is an association key handled below.
+        // only via AssociationKey::IssueRef, handled post-correlation.
 
         for (i, session) in self.sessions.iter().enumerate() {
             items.push(CorrelatedItem {
                 provider_name: "session".to_string(),
                 kind: CorItemKind::CloudSession,
                 title: session.title.clone(),
-                correlation_keys: strip_issue_refs(&session.correlation_keys),
+                correlation_keys: session.correlation_keys.clone(),
                 source_index: i,
             });
         }
@@ -278,7 +270,7 @@ impl DataStore {
                 provider_name: "workspace".to_string(),
                 kind: CorItemKind::Workspace,
                 title: ws.name.clone(),
-                correlation_keys: strip_issue_refs(&ws.correlation_keys),
+                correlation_keys: ws.correlation_keys.clone(),
                 source_index: i,
             });
         }
@@ -295,16 +287,15 @@ impl DataStore {
         for group in &groups {
             let mut work_item = self.group_to_work_item(group);
 
-            // Post-correlation: link issues via IssueRef keys on change requests
+            // Post-correlation: link issues via association keys on change requests
             if let Some(pr_i) = work_item.pr_idx {
                 if let Some(cr) = self.change_requests.get(pr_i) {
-                    for key in &cr.correlation_keys {
-                        if let CorrelationKey::IssueRef(_, issue_id) = key {
-                            if let Some(issue_idx) = self.issues.iter().position(|i| &i.id == issue_id) {
-                                if !work_item.issue_idxs.contains(&issue_idx) {
-                                    work_item.issue_idxs.push(issue_idx);
-                                    linked_issue_indices.insert(issue_idx);
-                                }
+                    for key in &cr.association_keys {
+                        let AssociationKey::IssueRef(_, issue_id) = key;
+                        if let Some(issue_idx) = self.issues.iter().position(|i| &i.id == issue_id) {
+                            if !work_item.issue_idxs.contains(&issue_idx) {
+                                work_item.issue_idxs.push(issue_idx);
+                                linked_issue_indices.insert(issue_idx);
                             }
                         }
                     }

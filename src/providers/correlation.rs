@@ -2,17 +2,15 @@ use std::collections::HashMap;
 
 use super::types::CorrelationKey;
 
-/// The kind of item being correlated.
+/// The kind of item being correlated (identity-keyed items only).
+/// Issues and remote branches are not correlated — they use association
+/// keys or are handled separately.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ItemKind {
     Checkout,
     ChangeRequest,
-    #[allow(dead_code)]
-    Issue,
     CloudSession,
     Workspace,
-    #[allow(dead_code)]
-    RemoteBranch,
 }
 
 /// A single item submitted for correlation.
@@ -217,28 +215,28 @@ mod tests {
 
     #[test]
     fn transitive_correlation() {
-        // checkout --[Branch]--> PR --[IssueRef]--> issue
+        // checkout --[Branch]--> PR, session --[Branch]--> same group
         let items = vec![
             item(
                 "git",
                 ItemKind::Checkout,
                 "feat-x checkout",
-                vec![CorrelationKey::Branch("feat-x".into())],
+                vec![
+                    CorrelationKey::Branch("feat-x".into()),
+                    CorrelationKey::CheckoutPath("/code/feat-x".into()),
+                ],
             ),
             item(
                 "github",
                 ItemKind::ChangeRequest,
                 "PR #42",
-                vec![
-                    CorrelationKey::Branch("feat-x".into()),
-                    CorrelationKey::IssueRef("github".into(), "99".into()),
-                ],
+                vec![CorrelationKey::Branch("feat-x".into())],
             ),
             item(
-                "github",
-                ItemKind::Issue,
-                "Issue #99",
-                vec![CorrelationKey::IssueRef("github".into(), "99".into())],
+                "cmux",
+                ItemKind::Workspace,
+                "my-workspace",
+                vec![CorrelationKey::CheckoutPath("/code/feat-x".into())],
             ),
         ];
 
@@ -247,7 +245,7 @@ mod tests {
         assert_eq!(groups[0].items.len(), 3);
         assert!(groups[0].has(&ItemKind::Checkout));
         assert!(groups[0].has(&ItemKind::ChangeRequest));
-        assert!(groups[0].has(&ItemKind::Issue));
+        assert!(groups[0].has(&ItemKind::Workspace));
     }
 
     #[test]
@@ -266,10 +264,10 @@ mod tests {
                 vec![CorrelationKey::Branch("branch-b".into())],
             ),
             item(
-                "github",
-                ItemKind::Issue,
-                "Issue #1",
-                vec![CorrelationKey::IssueRef("github".into(), "1".into())],
+                "claude",
+                ItemKind::CloudSession,
+                "session-1",
+                vec![CorrelationKey::SessionRef("claude".into(), "s1".into())],
             ),
         ];
 
@@ -282,7 +280,7 @@ mod tests {
         let items = vec![
             item("git", ItemKind::Checkout, "orphan-a", vec![]),
             item("github", ItemKind::ChangeRequest, "orphan-b", vec![]),
-            item("github", ItemKind::Issue, "orphan-c", vec![]),
+            item("claude", ItemKind::CloudSession, "orphan-c", vec![]),
         ];
 
         let groups = correlate(items);
@@ -290,7 +288,7 @@ mod tests {
     }
 
     #[test]
-    fn workspace_correlates_via_repo_path() {
+    fn workspace_correlates_via_checkout_path() {
         let repo = PathBuf::from("/home/user/project");
         let items = vec![
             item(

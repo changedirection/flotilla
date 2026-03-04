@@ -61,7 +61,7 @@ impl super::IssueTracker for GitHubIssueTracker {
             .into_iter()
             .map(|issue| {
                 let id = issue.number.to_string();
-                let correlation_keys = vec![CorrelationKey::IssueRef(
+                let association_keys = vec![AssociationKey::IssueRef(
                     self.provider_name.clone(),
                     id.clone(),
                 )];
@@ -69,7 +69,7 @@ impl super::IssueTracker for GitHubIssueTracker {
                     id,
                     title: issue.title,
                     labels: issue.labels.into_iter().map(|l| l.name).collect(),
-                    correlation_keys,
+                    association_keys,
                 }
             })
             .collect())

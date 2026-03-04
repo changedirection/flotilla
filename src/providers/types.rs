@@ -1,13 +1,21 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+/// Identity keys — safe for union-find grouping. Items sharing a
+/// CorrelationKey are the same work unit.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum CorrelationKey {
     Branch(String),
     CheckoutPath(PathBuf),
-    IssueRef(String, String),          // (provider_name, issue_id)
     ChangeRequestRef(String, String),  // (provider_name, CR id)
     SessionRef(String, String),        // (provider_name, session_id)
+}
+
+/// Association keys — "related to" links that do NOT merge work units.
+/// Two PRs referencing the same issue are separate work streams.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum AssociationKey {
+    IssueRef(String, String),          // (provider_name, issue_id)
 }
 
 #[allow(dead_code)]
@@ -58,6 +66,7 @@ pub struct ChangeRequest {
     #[allow(dead_code)]
     pub body: Option<String>,
     pub correlation_keys: Vec<CorrelationKey>,
+    pub association_keys: Vec<AssociationKey>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -74,7 +83,7 @@ pub struct Issue {
     pub title: String,
     pub labels: Vec<String>,
     #[allow(dead_code)]
-    pub correlation_keys: Vec<CorrelationKey>,
+    pub association_keys: Vec<AssociationKey>,
 }
 
 #[derive(Debug, Clone)]
