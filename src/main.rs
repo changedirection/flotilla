@@ -311,6 +311,7 @@ async fn run(terminal: &mut ratatui::DefaultTerminal, repo_roots: Vec<PathBuf>) 
                 };
                 match branch_result {
                     Some(Ok(branch)) => app.prefill_branch_input(&branch),
+                    // None = no AI provider, Some(Err(_)) = AI call failed
                     _ => {
                         let fallback: Vec<String> = issues.iter()
                             .map(|(id, _)| format!("issue-{}", id))

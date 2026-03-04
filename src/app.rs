@@ -297,12 +297,6 @@ impl App {
         self.repos.get_mut(key).unwrap()
     }
 
-    /// Reference to the active repo's provider registry.
-    #[allow(dead_code)]
-    pub fn active_registry(&self) -> &ProviderRegistry {
-        &self.active().registry
-    }
-
     /// Path of the active repo.
     pub fn active_repo_root(&self) -> &PathBuf {
         &self.repo_order[self.active_repo]
