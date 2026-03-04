@@ -261,6 +261,8 @@ pub struct App {
     // File picker state
     pub dir_entries: Vec<DirEntry>,
     pub dir_selected: usize,
+    pub file_picker_area: Rect,
+    pub file_picker_list_area: Rect,
 }
 
 impl App {
@@ -440,9 +442,12 @@ impl App {
             self.handle_menu_mouse(mouse);
             return;
         }
+        if self.input_mode == InputMode::AddRepo {
+            self.handle_file_picker_mouse(mouse);
+            return;
+        }
         if self.show_help || self.show_delete_confirm || self.generating_branch
             || self.input_mode == InputMode::BranchName
-            || self.input_mode == InputMode::AddRepo
         {
             return; // ignore mouse when other popups are open
         }
@@ -712,44 +717,63 @@ impl App {
                 }
             }
             KeyCode::Enter => {
-                if let Some(entry) = self.dir_entries.get(self.dir_selected).cloned() {
-                    if entry.is_git_repo && !entry.is_added {
-                        // Add this repo
-                        let current = self.input.value().to_string();
-                        let base = if current.ends_with('/') {
-                            current
-                        } else {
-                            current.rsplit_once('/')
-                                .map(|(prefix, _)| format!("{prefix}/"))
-                                .unwrap_or_default()
-                        };
-                        let path = PathBuf::from(format!("{}{}", base, entry.name));
-                        let canonical = std::fs::canonicalize(&path).unwrap_or(path);
-                        self.pending_action = PendingAction::AddRepo(canonical);
-                        self.input_mode = InputMode::Normal;
-                        self.input.reset();
-                        self.dir_entries.clear();
-                    } else if entry.is_dir {
-                        // Descend into directory
-                        let current = self.input.value().to_string();
-                        let base = if current.ends_with('/') {
-                            current
-                        } else {
-                            current.rsplit_once('/')
-                                .map(|(prefix, _)| format!("{prefix}/"))
-                                .unwrap_or_default()
-                        };
-                        let new_path = format!("{}{}/", base, entry.name);
-                        self.input = Input::from(new_path.as_str());
-                        self.dir_selected = 0;
-                        self.refresh_dir_listing();
-                    }
-                }
+                self.activate_dir_entry();
             }
             _ => {
                 self.input.handle_event(&crossterm::event::Event::Key(key));
                 self.dir_selected = 0;
                 self.refresh_dir_listing();
+            }
+        }
+    }
+
+    fn activate_dir_entry(&mut self) {
+        if let Some(entry) = self.dir_entries.get(self.dir_selected).cloned() {
+            let current = self.input.value().to_string();
+            let base = if current.ends_with('/') {
+                current
+            } else {
+                current.rsplit_once('/')
+                    .map(|(prefix, _)| format!("{prefix}/"))
+                    .unwrap_or_default()
+            };
+            if entry.is_git_repo && !entry.is_added {
+                let path = PathBuf::from(format!("{}{}", base, entry.name));
+                let canonical = std::fs::canonicalize(&path).unwrap_or(path);
+                self.pending_action = PendingAction::AddRepo(canonical);
+                self.input_mode = InputMode::Normal;
+                self.input.reset();
+                self.dir_entries.clear();
+            } else if entry.is_dir {
+                let new_path = format!("{}{}/", base, entry.name);
+                self.input = Input::from(new_path.as_str());
+                self.dir_selected = 0;
+                self.refresh_dir_listing();
+            }
+        }
+    }
+
+    pub fn handle_file_picker_mouse(&mut self, mouse: MouseEvent) {
+        if mouse.kind != MouseEventKind::Down(MouseButton::Left) {
+            return;
+        }
+        let x = mouse.column;
+        let y = mouse.row;
+        let a = self.file_picker_area;
+        // Click outside picker → close it
+        if x < a.x || x >= a.x + a.width || y < a.y || y >= a.y + a.height {
+            self.input_mode = InputMode::Normal;
+            self.input.reset();
+            self.dir_entries.clear();
+            return;
+        }
+        // Click in the list area → select and activate
+        let la = self.file_picker_list_area;
+        if x >= la.x && x < la.x + la.width && y >= la.y && y < la.y + la.height {
+            let row = (y - la.y) as usize;
+            if row < self.dir_entries.len() {
+                self.dir_selected = row;
+                self.activate_dir_entry();
             }
         }
     }

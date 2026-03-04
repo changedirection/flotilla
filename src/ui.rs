@@ -637,12 +637,13 @@ fn render_help(app: &App, frame: &mut Frame) {
     frame.render_widget(paragraph, area);
 }
 
-fn render_file_picker(app: &App, frame: &mut Frame) {
+fn render_file_picker(app: &mut App, frame: &mut Frame) {
     if app.input_mode != crate::app::InputMode::AddRepo {
         return;
     }
 
     let area = popup_area(frame.area(), 60, 60);
+    app.file_picker_area = area;
     frame.render_widget(Clear, area);
 
     let block = Block::bordered().title(" Add Repository ");
@@ -653,6 +654,8 @@ fn render_file_picker(app: &App, frame: &mut Frame) {
         .direction(Direction::Vertical)
         .constraints([Constraint::Length(1), Constraint::Min(0)])
         .split(inner);
+
+    app.file_picker_list_area = chunks[1];
 
     // Input line
     let input_text = app.input.value();
