@@ -12,6 +12,7 @@ impl GitVcs {
     }
 }
 
+#[allow(dead_code)]
 const TRUNK_NAMES: &[&str] = &["main", "master", "trunk"];
 
 #[async_trait]

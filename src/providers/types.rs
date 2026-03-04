@@ -10,6 +10,7 @@ pub enum CorrelationKey {
     SessionRef(String, String),        // (provider_name, session_id)
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct BranchInfo {
     pub name: String,
@@ -53,6 +54,7 @@ pub struct ChangeRequest {
     pub title: String,
     pub branch: String,
     pub status: ChangeRequestStatus,
+    #[allow(dead_code)]
     pub body: Option<String>,
     pub correlation_keys: Vec<CorrelationKey>,
 }

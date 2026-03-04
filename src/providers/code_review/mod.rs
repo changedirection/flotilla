@@ -6,8 +6,10 @@ use crate::providers::types::ChangeRequest;
 
 #[async_trait]
 pub trait CodeReview: Send + Sync {
+    #[allow(dead_code)]
     fn display_name(&self) -> &str;
     async fn list_change_requests(&self, repo_root: &Path, limit: usize) -> Result<Vec<ChangeRequest>, String>;
+    #[allow(dead_code)]
     async fn get_change_request(&self, repo_root: &Path, id: &str) -> Result<ChangeRequest, String>;
     async fn open_in_browser(&self, repo_root: &Path, id: &str) -> Result<(), String>;
     async fn list_merged_branch_names(&self, repo_root: &Path, limit: usize) -> Result<Vec<String>, String>;

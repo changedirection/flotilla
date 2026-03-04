@@ -1,5 +1,4 @@
 use serde::Deserialize;
-use std::path::Path;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct WorkspaceTemplate {
@@ -31,17 +30,6 @@ pub struct SurfaceTemplate {
 }
 
 impl WorkspaceTemplate {
-    #[allow(dead_code)]
-    pub fn load(repo_root: &Path) -> Self {
-        let path = repo_root.join(".cmux/workspace.yaml");
-        if path.exists() {
-            let content = std::fs::read_to_string(&path).unwrap_or_default();
-            serde_yaml::from_str(&content).unwrap_or_else(|_| Self::default_template())
-        } else {
-            Self::default_template()
-        }
-    }
-
     pub fn load_default() -> Self {
         Self::default_template()
     }

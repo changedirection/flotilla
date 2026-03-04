@@ -224,7 +224,7 @@ fn build_header_row(header: &SectionHeader) -> Row<'static> {
 
 fn build_item_row<'a>(item: &WorkItem, data: &crate::data::DataStore, col_widths: &[u16]) -> Row<'a> {
     let (icon, icon_color) = match item.kind {
-        WorkItemKind::Worktree => {
+        WorkItemKind::Checkout => {
             if !item.workspace_refs.is_empty() {
                 ("●", Color::Green)
             } else {

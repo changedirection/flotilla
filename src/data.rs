@@ -9,7 +9,7 @@ use crate::providers::registry::ProviderRegistry;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum WorkItemKind {
-    Worktree,
+    Checkout,
     Session,
     Pr,
     RemoteBranch,
@@ -18,7 +18,7 @@ pub enum WorkItemKind {
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum SectionHeader {
-    Worktrees,
+    Checkouts,
     Sessions,
     PullRequests,
     RemoteBranches,
@@ -28,7 +28,7 @@ pub enum SectionHeader {
 impl fmt::Display for SectionHeader {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            SectionHeader::Worktrees => write!(f, "Worktrees"),
+            SectionHeader::Checkouts => write!(f, "Worktrees"),
             SectionHeader::Sessions => write!(f, "Sessions"),
             SectionHeader::PullRequests => write!(f, "Pull Requests"),
             SectionHeader::RemoteBranches => write!(f, "Remote Branches"),
@@ -169,7 +169,7 @@ impl DataStore {
             let branch = co.branch.clone();
             let ws_refs = self.find_workspaces_for_checkout(co);
             let item = WorkItem {
-                kind: WorkItemKind::Worktree,
+                kind: WorkItemKind::Checkout,
                 branch: Some(branch.clone()),
                 description: branch.clone(),
                 worktree_idx: Some(i),
@@ -261,12 +261,12 @@ impl DataStore {
 
         // Worktrees section -- sorted by branch name
         let mut wt_items: Vec<WorkItem> = items_by_branch.values()
-            .filter(|item| item.kind == WorkItemKind::Worktree)
+            .filter(|item| item.kind == WorkItemKind::Checkout)
             .cloned()
             .collect();
         wt_items.sort_by(|a, b| a.branch.cmp(&b.branch));
         if !wt_items.is_empty() {
-            entries.push(TableEntry::Header(SectionHeader::Worktrees));
+            entries.push(TableEntry::Header(SectionHeader::Checkouts));
             for item in wt_items {
                 selectable.push(entries.len());
                 entries.push(TableEntry::Item(item));

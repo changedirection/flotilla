@@ -153,7 +153,7 @@ impl Action {
                 }
             }
             Action::RemoveWorktree => {
-                if item.kind != WorkItemKind::Worktree || item.is_main_worktree {
+                if item.kind != WorkItemKind::Checkout || item.is_main_worktree {
                     return;
                 }
                 if let Some(si) = app.active().selected_selectable_idx {

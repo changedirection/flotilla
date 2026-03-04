@@ -8,13 +8,11 @@ use crate::template::WorkspaceTemplate;
 
 const CMUX_BIN: &str = "/Applications/cmux.app/Contents/Resources/bin/cmux";
 
-pub struct CmuxWorkspaceManager {
-    provider_name: String,
-}
+pub struct CmuxWorkspaceManager;
 
 impl CmuxWorkspaceManager {
-    pub fn new(provider_name: String) -> Self {
-        Self { provider_name }
+    pub fn new() -> Self {
+        Self
     }
 
     async fn cmux_cmd(args: &[&str]) -> Result<String, String> {

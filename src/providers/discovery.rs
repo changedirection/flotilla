@@ -109,7 +109,7 @@ pub fn detect_providers(repo_root: &Path) -> ProviderRegistry {
     if cmux_bin.exists() {
         registry.workspace_manager = Some((
             "cmux".to_string(),
-            Box::new(CmuxWorkspaceManager::new("cmux".to_string())),
+            Box::new(CmuxWorkspaceManager::new()),
         ));
     }
     // TODO: check $ZELLIJ env var for Zellij workspace manager

@@ -5,8 +5,10 @@ use crate::providers::types::CloudAgentSession;
 
 #[async_trait]
 pub trait CodingAgent: Send + Sync {
+    #[allow(dead_code)]
     fn display_name(&self) -> &str;
     async fn list_sessions(&self) -> Result<Vec<CloudAgentSession>, String>;
     async fn archive_session(&self, session_id: &str) -> Result<(), String>;
+    #[allow(dead_code)]
     async fn attach_command(&self, session_id: &str) -> Result<String, String>;
 }
