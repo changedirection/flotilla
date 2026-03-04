@@ -137,14 +137,14 @@ pub fn detect_providers(repo_root: &Path) -> ProviderRegistry {
     }
 
     // 4. Coding agent & AI utility: claude
-    if resolve_claude_path().is_some() {
+    if let Some(claude_bin) = resolve_claude_path() {
         registry.coding_agents.insert(
             "claude".to_string(),
             Arc::new(ClaudeCodingAgent::new("claude".to_string())),
         );
         registry
             .ai_utilities
-            .insert("claude".to_string(), Box::new(ClaudeAiUtility::new()));
+            .insert("claude".to_string(), Box::new(ClaudeAiUtility::new(claude_bin)));
         info!("{repo_name}: Coding agent → Claude Sessions");
         info!("{repo_name}: AI utility → Claude");
     }

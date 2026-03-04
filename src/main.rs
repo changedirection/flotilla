@@ -370,7 +370,8 @@ async fn run(terminal: &mut ratatui::DefaultTerminal, repo_roots: Vec<PathBuf>) 
             }
             app::PendingAction::TeleportSession { session_id, branch, worktree_idx } => {
                 info!("teleporting to session {session_id}");
-                let teleport_cmd = format!("claude --teleport {}", session_id);
+                let claude_bin = providers::resolve_claude_path().unwrap_or_else(|| "claude".into());
+                let teleport_cmd = format!("{} --teleport {}", claude_bin, session_id);
                 let wt_path = if let Some(wt_idx) = worktree_idx {
                     app.active().data.checkouts.get(wt_idx).map(|co| co.path.clone())
                 } else if let Some(branch_name) = &branch {
@@ -573,20 +574,20 @@ async fn refresh_all(app: &mut app::App) {
         // Track per-provider statuses and log errors
         let name = app::App::repo_name(&path);
 
-        // Mark coding agents as ok/error based on session fetch result
+        // Mark coding agents as ok/error based on category
         for (pname, _) in rs.registry.coding_agents.iter() {
             let key = (path.clone(), "coding_agent".into(), pname.clone());
-            if errors.iter().any(|e| e.contains("session") || e.contains("Session") || e.contains("auth") || e.contains("credential")) {
+            if errors.iter().any(|e| e.category == "sessions") {
                 app.provider_statuses.insert(key, app::ProviderStatus::Error);
             } else {
                 app.provider_statuses.insert(key, app::ProviderStatus::Ok);
             }
         }
 
-        // Mark code review / issue tracker based on errors
+        // Mark code review / issue tracker based on category
         for (pname, _) in rs.registry.code_review.iter() {
             let key = (path.clone(), "code_review".into(), pname.clone());
-            if errors.iter().any(|e| e.contains("PR") || e.contains("pull")) {
+            if errors.iter().any(|e| e.category == "PRs" || e.category == "merged") {
                 app.provider_statuses.insert(key, app::ProviderStatus::Error);
             } else {
                 app.provider_statuses.insert(key, app::ProviderStatus::Ok);
@@ -594,7 +595,7 @@ async fn refresh_all(app: &mut app::App) {
         }
         for (pname, _) in rs.registry.issue_trackers.iter() {
             let key = (path.clone(), "issue_tracker".into(), pname.clone());
-            if errors.iter().any(|e| e.contains("issue") || e.contains("Issue")) {
+            if errors.iter().any(|e| e.category == "issues") {
                 app.provider_statuses.insert(key, app::ProviderStatus::Error);
             } else {
                 app.provider_statuses.insert(key, app::ProviderStatus::Ok);
@@ -603,8 +604,8 @@ async fn refresh_all(app: &mut app::App) {
 
         if !errors.is_empty() {
             for e in &errors {
-                error!("{name}: {e}");
-                all_errors.push(format!("{name}: {e}"));
+                error!("{name}: {}: {}", e.category, e.message);
+                all_errors.push(format!("{name}: {}: {}", e.category, e.message));
             }
         }
     }
@@ -613,5 +614,7 @@ async fn refresh_all(app: &mut app::App) {
 
     if !all_errors.is_empty() {
         app.status_message = Some(all_errors.join("; "));
+    } else {
+        app.status_message = None;
     }
 }

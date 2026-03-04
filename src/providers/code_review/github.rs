@@ -16,6 +16,8 @@ struct GhPr {
     state: String,
     #[serde(default)]
     body: Option<String>,
+    #[serde(default, rename = "isDraft")]
+    is_draft: bool,
 }
 
 use crate::providers::run_cmd;
@@ -44,7 +46,7 @@ impl GitHubCodeReview {
             let mut search_from = 0;
             while let Some(pos) = lower[search_from..].find(keyword) {
                 let after = search_from + pos + keyword.len();
-                let rest = &text[after..];
+                let rest = &lower[after..];
                 let rest = rest.trim_start();
                 if let Some(rest) = rest.strip_prefix('#') {
                     let num_str: String =
@@ -79,11 +81,17 @@ impl GitHubCodeReview {
             }
         }
 
+        let status = if pr.state.to_uppercase() == "OPEN" && pr.is_draft {
+            ChangeRequestStatus::Draft
+        } else {
+            Self::parse_state(&pr.state)
+        };
+
         ChangeRequest {
             id,
             title: pr.title.clone(),
             branch: pr.head_ref_name.clone(),
-            status: Self::parse_state(&pr.state),
+            status,
             body: pr.body.clone(),
             correlation_keys,
             association_keys,
@@ -109,7 +117,7 @@ impl super::CodeReview for GitHubCodeReview {
                     "pr",
                     "list",
                     "--json",
-                    "number,title,headRefName,state,body",
+                    "number,title,headRefName,state,body,isDraft",
                     "--limit",
                     &limit_str,
                 ],
@@ -133,7 +141,7 @@ impl super::CodeReview for GitHubCodeReview {
                     "view",
                     id,
                     "--json",
-                    "number,title,headRefName,state,body",
+                    "number,title,headRefName,state,body,isDraft",
                 ],
                 repo_root,
             )

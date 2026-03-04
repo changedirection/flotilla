@@ -143,7 +143,7 @@ impl super::CheckoutManager for WtCheckoutManager {
             serde_json::from_str(json).map_err(|e| e.to_string())?;
 
         for wt in worktrees {
-            if wt.branch == branch || wt.branch.ends_with(branch) {
+            if wt.branch == branch || wt.branch.ends_with(&format!("/{branch}")) {
                 info!("wt: created {branch} at {}", wt.path.display());
                 return Ok(wt.into_checkout());
             }

@@ -8,6 +8,18 @@ use crate::providers::types::{
 };
 use crate::providers::registry::ProviderRegistry;
 
+#[derive(Debug, Clone)]
+pub struct ProviderError {
+    pub category: &'static str,
+    pub message: String,
+}
+
+impl fmt::Display for ProviderError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}: {}", self.category, self.message)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum WorkItemKind {
     Checkout,
@@ -76,7 +88,7 @@ pub struct DataStore {
 }
 
 impl DataStore {
-    pub async fn refresh(&mut self, repo_root: &Path, registry: &ProviderRegistry, criteria: &RepoCriteria) -> Vec<String> {
+    pub async fn refresh(&mut self, repo_root: &Path, registry: &ProviderRegistry, criteria: &RepoCriteria) -> Vec<ProviderError> {
         self.loading = true;
         let mut errors = Vec::new();
 
@@ -147,13 +159,13 @@ impl DataStore {
             checkouts_fut, cr_fut, issues_fut, sessions_fut, branches_fut, merged_fut, ws_fut
         );
 
-        self.checkouts = checkouts.unwrap_or_else(|e| { errors.push(format!("checkouts: {e}")); Vec::new() });
-        self.change_requests = crs.unwrap_or_else(|e| { errors.push(format!("PRs: {e}")); Vec::new() });
-        self.issues = issues.unwrap_or_else(|e| { errors.push(format!("issues: {e}")); Vec::new() });
-        self.workspaces = workspaces.unwrap_or_else(|e| { errors.push(format!("workspaces: {e}")); Vec::new() });
-        self.sessions = sessions.unwrap_or_else(|e| { errors.push(format!("sessions: {e}")); Vec::new() });
-        self.remote_branches = branches.unwrap_or_else(|e| { errors.push(format!("branches: {e}")); Vec::new() });
-        self.merged_branches = merged.unwrap_or_else(|e| { errors.push(format!("merged: {e}")); Vec::new() });
+        self.checkouts = checkouts.unwrap_or_else(|e| { errors.push(ProviderError { category: "checkouts", message: e }); Vec::new() });
+        self.change_requests = crs.unwrap_or_else(|e| { errors.push(ProviderError { category: "PRs", message: e }); Vec::new() });
+        self.issues = issues.unwrap_or_else(|e| { errors.push(ProviderError { category: "issues", message: e }); Vec::new() });
+        self.workspaces = workspaces.unwrap_or_else(|e| { errors.push(ProviderError { category: "workspaces", message: e }); Vec::new() });
+        self.sessions = sessions.unwrap_or_else(|e| { errors.push(ProviderError { category: "sessions", message: e }); Vec::new() });
+        self.remote_branches = branches.unwrap_or_else(|e| { errors.push(ProviderError { category: "branches", message: e }); Vec::new() });
+        self.merged_branches = merged.unwrap_or_else(|e| { errors.push(ProviderError { category: "merged", message: e }); Vec::new() });
         self.correlate();
         self.loading = false;
         errors
@@ -483,13 +495,50 @@ pub async fn fetch_delete_confirm_info(
     let pr_num = pr_number.map(|s| s.to_string());
     let repo2 = repo_root.to_path_buf();
 
+    let repo_for_base = repo.clone();
+    let branch_for_base = branch_owned.clone();
+
     let (unpushed, uncommitted, pr_info) = tokio::join!(
         async {
-            run_command(
-                "git",
-                &["log", &format!("origin/main..{}", branch_owned), "--oneline"],
-                Some(&repo),
-            ).await.unwrap_or_default()
+            // Detect upstream tracking branch, fall back to remote HEAD, then give up with a warning
+            let base = async {
+                // Try upstream tracking ref
+                let upstream = run_command(
+                    "git",
+                    &["rev-parse", "--abbrev-ref", &format!("{branch_for_base}@{{upstream}}")],
+                    Some(&repo_for_base),
+                ).await;
+                if let Ok(ref u) = upstream {
+                    let u = u.trim();
+                    if !u.is_empty() {
+                        return Ok(u.to_string());
+                    }
+                }
+                // Fall back to origin/HEAD (e.g. origin/main)
+                let remote_head = run_command(
+                    "git",
+                    &["rev-parse", "--abbrev-ref", "origin/HEAD"],
+                    Some(&repo_for_base),
+                ).await;
+                if let Ok(ref rh) = remote_head {
+                    let rh = rh.trim();
+                    if !rh.is_empty() {
+                        return Ok(rh.to_string());
+                    }
+                }
+                Err("(could not determine base — unpushed status unknown)".to_string())
+            }.await;
+
+            match base {
+                Ok(base_ref) => {
+                    run_command(
+                        "git",
+                        &["log", &format!("{base_ref}..{branch_for_base}"), "--oneline"],
+                        Some(&repo_for_base),
+                    ).await.unwrap_or_default()
+                }
+                Err(warning) => warning,
+            }
         },
         async {
             if let Some(path) = &wt_path {

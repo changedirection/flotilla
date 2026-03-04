@@ -41,6 +41,11 @@ impl CmuxWorkspaceManager {
         Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
     }
 
+    /// Shell-quote a string with single quotes, escaping embedded single quotes.
+    fn shell_quote(s: &str) -> String {
+        format!("'{}'", s.replace('\'', "'\\''"))
+    }
+
     /// Parse "OK surface:N workspace:M" -> "surface:N"
     fn parse_ok_ref(output: &str) -> String {
         output
@@ -196,10 +201,11 @@ impl super::WorkspaceManager for CmuxWorkspaceManager {
                     Self::parse_ok_ref(&output)
                 };
 
+                let quoted_dir = Self::shell_quote(&working_dir.display().to_string());
                 let cmd = if surface.command.is_empty() {
-                    format!("cd {}", working_dir.display())
+                    format!("cd {}", quoted_dir)
                 } else {
-                    format!("cd {} && {}", working_dir.display(), surface.command)
+                    format!("cd {} && {}", quoted_dir, surface.command)
                 };
                 surface_cmds.push((surface_ref.clone(), cmd));
 

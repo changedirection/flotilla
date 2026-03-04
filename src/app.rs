@@ -451,7 +451,7 @@ impl App {
     }
 
     #[allow(dead_code)]
-    pub async fn refresh_data(&mut self) -> Vec<String> {
+    pub async fn refresh_data(&mut self) -> Vec<crate::data::ProviderError> {
         let key = self.repo_order[self.active_repo].clone();
         let rs = self.repos.get_mut(&key).unwrap();
         let mut ds = std::mem::take(&mut rs.data);

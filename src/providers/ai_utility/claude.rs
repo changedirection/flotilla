@@ -2,17 +2,13 @@ use async_trait::async_trait;
 use tokio::process::Command;
 use tracing::info;
 
-pub struct ClaudeAiUtility;
-
-impl Default for ClaudeAiUtility {
-    fn default() -> Self {
-        Self::new()
-    }
+pub struct ClaudeAiUtility {
+    claude_bin: String,
 }
 
 impl ClaudeAiUtility {
-    pub fn new() -> Self {
-        Self
+    pub fn new(claude_bin: String) -> Self {
+        Self { claude_bin }
     }
 }
 
@@ -29,7 +25,7 @@ impl super::AiUtility for ClaudeAiUtility {
              Output ONLY the branch name, nothing else. Use kebab-case: {context}"
         );
 
-        let output = Command::new("claude")
+        let output = Command::new(&self.claude_bin)
             .args(["-p", &prompt])
             .output()
             .await
