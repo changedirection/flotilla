@@ -5,6 +5,7 @@ mod event;
 mod template;
 mod ui;
 mod config;
+mod providers;
 
 use std::io::stdout;
 use std::path::PathBuf;
