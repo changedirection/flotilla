@@ -1,6 +1,80 @@
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
+/// Global flotilla config from ~/.config/flotilla/config.toml
+#[derive(Debug, Default, Deserialize)]
+pub struct FlotillaConfig {
+    #[serde(default)]
+    pub vcs: VcsConfig,
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub struct VcsConfig {
+    #[serde(default)]
+    pub git: GitConfig,
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub struct GitConfig {
+    #[serde(default)]
+    pub checkouts: CheckoutsConfig,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct CheckoutsConfig {
+    #[serde(default = "CheckoutsConfig::default_path")]
+    pub path: String,
+    #[serde(default = "CheckoutsConfig::default_provider")]
+    pub provider: String,
+}
+
+impl Default for CheckoutsConfig {
+    fn default() -> Self {
+        Self {
+            path: Self::default_path(),
+            provider: Self::default_provider(),
+        }
+    }
+}
+
+impl CheckoutsConfig {
+    fn default_path() -> String {
+        "{{ repo_path }}/../{{ repo }}.{{ branch | sanitize }}".to_string()
+    }
+    fn default_provider() -> String {
+        "auto".to_string()
+    }
+}
+
+/// Full repo config file including optional overrides.
+#[derive(Debug, Default, Deserialize)]
+pub struct RepoFileConfig {
+    #[allow(dead_code)] // Required field so TOML parsing accepts existing repo files
+    pub path: String,
+    #[serde(default)]
+    pub vcs: RepoVcsConfig,
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub struct RepoVcsConfig {
+    #[serde(default)]
+    pub git: RepoGitConfig,
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub struct RepoGitConfig {
+    #[serde(default)]
+    pub checkouts: RepoCheckoutsOverride,
+}
+
+/// Per-repo checkout overrides. Fields are Option so we can distinguish
+/// "not set" from "explicitly set to the default value."
+#[derive(Debug, Default, Deserialize)]
+pub struct RepoCheckoutsOverride {
+    pub path: Option<String>,
+    pub provider: Option<String>,
+}
+
 #[derive(Serialize, Deserialize)]
 struct RepoConfig {
     path: String,
@@ -94,4 +168,41 @@ pub fn save_tab_order(order: &[PathBuf]) {
     if let Ok(content) = serde_json::to_string_pretty(&paths) {
         let _ = std::fs::write(tab_order_file(), content);
     }
+}
+
+/// Load global flotilla config from ~/.config/flotilla/config.toml.
+pub fn load_config() -> FlotillaConfig {
+    let path = dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("~"))
+        .join(".config/flotilla/config.toml");
+    std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|content| {
+            toml::from_str(&content)
+                .map_err(|e| tracing::warn!("failed to parse {}: {e}", path.display()))
+                .ok()
+        })
+        .unwrap_or_default()
+}
+
+/// Resolve checkouts config for a repo: per-repo override > global > defaults.
+pub fn resolve_checkouts_config(repo_root: &std::path::Path) -> CheckoutsConfig {
+    let global = load_config();
+    let slug = path_to_slug(repo_root);
+    let repo_file = config_dir().join(format!("{slug}.toml"));
+    if let Ok(content) = std::fs::read_to_string(&repo_file) {
+        match toml::from_str::<RepoFileConfig>(&content) {
+            Ok(repo_cfg) => {
+                let repo_co = &repo_cfg.vcs.git.checkouts;
+                return CheckoutsConfig {
+                    path: repo_co.path.clone().unwrap_or(global.vcs.git.checkouts.path),
+                    provider: repo_co.provider.clone().unwrap_or(global.vcs.git.checkouts.provider),
+                };
+            }
+            Err(e) => {
+                tracing::warn!("failed to parse {}: {e}", repo_file.display());
+            }
+        }
+    }
+    global.vcs.git.checkouts
 }
