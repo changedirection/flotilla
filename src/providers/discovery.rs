@@ -3,10 +3,11 @@ use std::process::Stdio;
 use std::sync::Arc;
 
 use super::{command_exists, resolve_claude_path};
-use tracing::info;
+use tracing::{info, warn};
 use crate::providers::ai_utility::claude::ClaudeAiUtility;
 use crate::providers::code_review::github::GitHubCodeReview;
 use crate::providers::coding_agent::claude::ClaudeCodingAgent;
+use crate::providers::github_api::GhApiClient;
 use crate::providers::issue_tracker::github::GitHubIssueTracker;
 use crate::providers::registry::ProviderRegistry;
 use crate::providers::vcs::git::GitVcs;
@@ -56,10 +57,9 @@ pub fn first_remote_url(repo_root: &Path) -> Option<String> {
     None
 }
 
-/// Check all git remotes for known hosts.
+/// Check a remote URL for known hosts.
 /// Returns "github" or "gitlab" if matched, None otherwise.
-fn detect_remote_host(repo_root: &Path) -> Option<String> {
-    let url = first_remote_url(repo_root)?;
+fn detect_host_from_url(url: &str) -> Option<String> {
     let url_lower = url.to_lowercase();
     if url_lower.contains("github.com") {
         Some("github".to_string())
@@ -153,18 +153,24 @@ pub fn detect_providers(repo_root: &Path) -> ProviderRegistry {
     }
 
     // 3. Remote host detection -> code review & issue tracker
-    if let Some(ref host) = detect_remote_host(repo_root) {
+    let remote_url = first_remote_url(repo_root);
+    if let Some(ref host) = remote_url.as_deref().and_then(detect_host_from_url) {
         if host == "github" && command_exists("gh", &["--version"]) {
-            registry.code_review.insert(
-                "github".to_string(),
-                Arc::new(GitHubCodeReview::new("github".to_string())),
-            );
-            registry.issue_trackers.insert(
-                "github".to_string(),
-                Arc::new(GitHubIssueTracker::new("github".to_string())),
-            );
-            info!("{repo_name}: Code review → GitHub");
-            info!("{repo_name}: Issue tracker → GitHub");
+            if let Some(slug) = remote_url.as_deref().and_then(extract_repo_slug) {
+                let api = Arc::new(GhApiClient::new());
+                registry.code_review.insert(
+                    "github".to_string(),
+                    Arc::new(GitHubCodeReview::new("github".to_string(), slug.clone(), Arc::clone(&api))),
+                );
+                registry.issue_trackers.insert(
+                    "github".to_string(),
+                    Arc::new(GitHubIssueTracker::new("github".to_string(), slug, api)),
+                );
+                info!("{repo_name}: Code review → GitHub");
+                info!("{repo_name}: Issue tracker → GitHub");
+            } else {
+                warn!("{repo_name}: GitHub detected but could not determine repo slug — skipping GitHub providers");
+            }
         }
         // TODO: GitLab support
     }
