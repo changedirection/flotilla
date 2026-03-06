@@ -32,7 +32,11 @@ impl super::AiUtility for ClaudeAiUtility {
             .map_err(|e| e.to_string())?;
 
         if output.status.success() {
-            let branch = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            let branch = String::from_utf8_lossy(&output.stdout)
+                .trim()
+                .trim_matches(|c| c == '`' || c == '"' || c == '\'')
+                .trim()
+                .to_string();
             if branch.is_empty() {
                 Err("claude returned empty output".to_string())
             } else {
