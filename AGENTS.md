@@ -15,7 +15,12 @@ Flotilla is a single Rust TUI binary (no databases, Docker, or background servic
 
 ### Toolchain
 
-The VM ships with Rust 1.83 by default, but dependencies require edition 2024 (Rust ≥ 1.85). The update script handles upgrading to `stable` automatically via `rustup default stable && rustup update stable`.
+The VM ships with Rust 1.83 by default, but dependencies require edition 2024 (Rust ≥ 1.85). The update script handles upgrading automatically:
+
+```bash
+rustup default stable
+rustup update stable
+```
 
 ### Running the app
 
@@ -30,7 +35,7 @@ The app auto-detects git, GitHub (`gh` CLI), Claude, and terminal multiplexers f
 | Task | Command |
 |------|---------|
 | Build | `cargo build --locked` |
-| Lint (format) | `cargo fmt --check` |
+| Lint (format) | `cargo fmt` (fix) / `cargo fmt --check` (verify) |
 | Lint (clippy) | `cargo clippy --all-targets --locked -- -D warnings` |
 | Test | `cargo test --workspace --locked` |
 | Run | `cargo run -- --repo-root /workspace` |
@@ -39,3 +44,4 @@ The app auto-detects git, GitHub (`gh` CLI), Claude, and terminal multiplexers f
 
 - `cargo build` without `--locked` may update `Cargo.lock`; use `--locked` for reproducible builds.
 - The TUI needs a real terminal (TTY). Use `cargo run` inside a terminal emulator, not piped.
+- Cursor Cloud VMs do **not** have the socket-bind restriction that Codex sandboxes have. Use the normal `cargo test --workspace --locked` command (the `skip-no-sandbox-tests` feature flag is not needed here).
