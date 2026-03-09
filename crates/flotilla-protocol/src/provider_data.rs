@@ -84,6 +84,17 @@ pub struct IssuePage {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IssueChangeset {
+    pub updated: Vec<(String, Issue)>,
+    pub closed_ids: Vec<String>,
+    /// Whether the provider had more changes than it returned. When true,
+    /// the caller should discard this changeset and perform a full re-fetch
+    /// instead of applying it incrementally. This differs from
+    /// `IssuePage::has_more`, which signals additional pages to paginate.
+    pub has_more: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CloudAgentSession {
     pub title: String,
     pub status: SessionStatus,
@@ -320,6 +331,31 @@ mod tests {
         assert!(pd.sessions.is_empty());
         assert!(pd.branches.is_empty());
         assert!(pd.workspaces.is_empty());
+    }
+
+    #[test]
+    fn issue_changeset_roundtrip() {
+        let changeset = IssueChangeset {
+            updated: vec![(
+                "42".into(),
+                Issue {
+                    title: "Updated issue".into(),
+                    labels: vec!["bug".into()],
+                    association_keys: vec![],
+                },
+            )],
+            closed_ids: vec!["7".into(), "13".into()],
+            has_more: false,
+        };
+        assert_roundtrip(&changeset);
+
+        // Empty changeset
+        let empty = IssueChangeset {
+            updated: vec![],
+            closed_ids: vec![],
+            has_more: false,
+        };
+        assert_roundtrip(&empty);
     }
 
     #[test]

@@ -29,6 +29,10 @@ use crate::model::{provider_names_from_registry, repo_name, RepoModel};
 use crate::providers::CommandRunner;
 use crate::refresh::RefreshSnapshot;
 
+fn now_iso8601() -> String {
+    chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+}
+
 /// Returned by `execute()` for commands that run inline without lifecycle events.
 /// Callers must not treat this as a real command ID for in-flight tracking.
 const INLINE_COMMAND_ID: u64 = 0;
@@ -408,6 +412,7 @@ impl InProcessDaemon {
         // main snapshot broadcast path.
         drop(repos);
         self.fetch_missing_linked_issues().await;
+        self.refresh_issues_incremental().await;
     }
 
     /// Fetch issue pages until the cache has at least `desired_count` entries
@@ -460,6 +465,9 @@ impl InProcessDaemon {
                     let mut repos = self.repos.write().await;
                     if let Some(state) = repos.get_mut(repo) {
                         state.issue_cache.merge_page(page);
+                        if state.issue_cache.last_refreshed_at.is_none() {
+                            state.issue_cache.mark_refreshed(now_iso8601());
+                        }
                     }
                 }
                 Err(e) => {
@@ -568,6 +576,124 @@ impl InProcessDaemon {
                 Err(e) => {
                     tracing::warn!(
                         "failed to fetch linked issues for {}: {}",
+                        path.display(),
+                        e
+                    );
+                }
+            }
+        }
+    }
+
+    /// Incremental issue refresh: fetch issues changed since last refresh,
+    /// apply changeset to cache, and broadcast if anything changed.
+    async fn refresh_issues_incremental(&self) {
+        // Minimum interval between incremental refreshes (seconds).
+        const MIN_INTERVAL_SECS: i64 = 30;
+
+        let tasks: Vec<_> = {
+            let repos = self.repos.read().await;
+            repos
+                .iter()
+                .filter_map(|(path, state)| {
+                    let since = state.issue_cache.last_refreshed_at.as_ref()?;
+                    if state.model.registry.issue_trackers.is_empty() {
+                        return None;
+                    }
+                    // Skip if refreshed too recently
+                    if let Ok(last) = chrono::DateTime::parse_from_rfc3339(since) {
+                        let elapsed = chrono::Utc::now().signed_duration_since(last).num_seconds();
+                        if elapsed < MIN_INTERVAL_SECS {
+                            return None;
+                        }
+                    }
+                    Some((
+                        path.clone(),
+                        since.clone(),
+                        Arc::clone(&state.model.registry),
+                        Arc::clone(&state.issue_fetch_mutex),
+                        state.issue_cache.len(),
+                    ))
+                })
+                .collect()
+        };
+
+        for (path, since, registry, fetch_mutex, prev_count) in tasks {
+            let _guard = fetch_mutex.lock().await;
+            let tracker = match registry.issue_trackers.values().next() {
+                Some(t) => t,
+                None => continue,
+            };
+
+            // Record timestamp *before* the API call so the next `since`
+            // window overlaps rather than gaps — avoids missing updates
+            // that land on GitHub during the request.
+            let refresh_ts = now_iso8601();
+
+            match tracker.list_issues_changed_since(&path, &since, 50).await {
+                Ok(changeset) => {
+                    if changeset.has_more {
+                        // Too many changes — skip incremental, do a full re-fetch.
+                        // Don't reset until we have data to replace it with,
+                        // so transient API failures don't wipe the UI.
+                        drop(_guard);
+                        let first_page = {
+                            let reg = {
+                                let repos = self.repos.read().await;
+                                repos.get(&path).map(|s| Arc::clone(&s.model.registry))
+                            };
+                            if let Some(reg) = reg {
+                                if let Some(t) = reg.issue_trackers.values().next() {
+                                    t.list_issues_page(&path, 1, 50).await.ok()
+                                } else {
+                                    None
+                                }
+                            } else {
+                                None
+                            }
+                        };
+                        if first_page.is_some() {
+                            // First page succeeded — safe to reset and refill
+                            {
+                                let mut repos = self.repos.write().await;
+                                if let Some(state) = repos.get_mut(&path) {
+                                    state.issue_cache.reset();
+                                    if let Some(page) = first_page {
+                                        state.issue_cache.merge_page(page);
+                                    }
+                                }
+                            }
+                            // Continue fetching remaining pages
+                            self.ensure_issues_cached(&path, prev_count).await;
+                            {
+                                let mut repos = self.repos.write().await;
+                                if let Some(state) = repos.get_mut(&path) {
+                                    state.issue_cache.mark_refreshed(refresh_ts.clone());
+                                }
+                            }
+                            self.broadcast_snapshot(&path).await;
+                        } else {
+                            // Fetch failed — keep existing cache and do NOT advance
+                            // the timestamp, so the next incremental call retries
+                            // from the same `since` window.
+                        }
+                    } else {
+                        let has_changes =
+                            !changeset.updated.is_empty() || !changeset.closed_ids.is_empty();
+                        {
+                            let mut repos = self.repos.write().await;
+                            if let Some(state) = repos.get_mut(&path) {
+                                state.issue_cache.apply_changeset(changeset);
+                                state.issue_cache.mark_refreshed(refresh_ts);
+                            }
+                        }
+                        if has_changes {
+                            self.broadcast_snapshot(&path).await;
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "incremental issue refresh failed for {}: {}",
                         path.display(),
                         e
                     );
@@ -735,11 +861,44 @@ impl DaemonHandle for InProcessDaemon {
     }
 
     async fn refresh(&self, repo: &Path) -> Result<(), String> {
-        let repos = self.repos.read().await;
-        let state = repos
-            .get(repo)
-            .ok_or_else(|| format!("repo not tracked: {}", repo.display()))?;
-        state.model.refresh_handle.trigger_refresh();
+        let (prev_count, registry) = {
+            let repos = self.repos.read().await;
+            let state = repos
+                .get(repo)
+                .ok_or_else(|| format!("repo not tracked: {}", repo.display()))?;
+            state.model.refresh_handle.trigger_refresh();
+            (state.issue_cache.len(), Arc::clone(&state.model.registry))
+        };
+
+        if prev_count > 0 {
+            // Fetch page 1 before resetting, so failures don't wipe the UI.
+            let first_page = if let Some(t) = registry.issue_trackers.values().next() {
+                t.list_issues_page(repo, 1, 50).await.ok()
+            } else {
+                None
+            };
+
+            if first_page.is_some() {
+                {
+                    let mut repos = self.repos.write().await;
+                    if let Some(state) = repos.get_mut(repo) {
+                        state.issue_cache.reset();
+                        if let Some(page) = first_page {
+                            state.issue_cache.merge_page(page);
+                        }
+                    }
+                }
+                self.ensure_issues_cached(repo, prev_count).await;
+                {
+                    let mut repos = self.repos.write().await;
+                    if let Some(state) = repos.get_mut(repo) {
+                        state.issue_cache.mark_refreshed(now_iso8601());
+                    }
+                }
+                self.broadcast_snapshot(repo).await;
+            }
+        }
+
         Ok(())
     }
 
