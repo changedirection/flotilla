@@ -8,11 +8,12 @@ use std::path::Path;
 use flotilla_protocol::{Command, CommandResult};
 use tracing::{debug, error, info};
 
+use crate::data;
 use crate::provider_data::ProviderData;
 use crate::providers::registry::ProviderRegistry;
 use crate::providers::types::WorkspaceConfig;
+use crate::providers::types::{CloudAgentSession, CorrelationKey};
 use crate::providers::CommandRunner;
-use crate::{data, providers};
 
 /// Execute a `Command` against the given repo context.
 ///
@@ -213,19 +214,23 @@ pub async fn execute(
         }
 
         Command::ArchiveSession { session_id } => {
-            if providers_data.sessions.contains_key(session_id.as_str()) {
+            if let Some(session) = providers_data.sessions.get(session_id.as_str()) {
                 info!("archiving session {session_id}");
-                let result = if let Some(ca) = registry.coding_agents.values().next() {
-                    Some(ca.archive_session(&session_id).await)
+                if let Some(key) = session_provider_key(session, &session_id) {
+                    if let Some(ca) = registry.coding_agents.get(key) {
+                        match ca.archive_session(&session_id).await {
+                            Ok(()) => CommandResult::Ok,
+                            Err(e) => CommandResult::Error { message: e },
+                        }
+                    } else {
+                        CommandResult::Error {
+                            message: format!("No coding agent provider: {key}"),
+                        }
+                    }
                 } else {
-                    None
-                };
-                match result {
-                    Some(Ok(())) => CommandResult::Ok,
-                    Some(Err(e)) => CommandResult::Error { message: e },
-                    None => CommandResult::Error {
-                        message: "No coding agent available".to_string(),
-                    },
+                    CommandResult::Error {
+                        message: format!("Cannot determine provider for session {session_id}"),
+                    }
                 }
             } else {
                 CommandResult::Error {
@@ -302,10 +307,11 @@ pub async fn execute(
             checkout_key,
         } => {
             info!("teleporting to session {session_id}");
-            let claude_bin = providers::resolve_claude_path(runner)
-                .await
-                .unwrap_or_else(|| "claude".into());
-            let teleport_cmd = format!("{} --teleport {}", claude_bin, session_id);
+            let teleport_cmd =
+                match resolve_attach_command(&session_id, registry, providers_data).await {
+                    Ok(cmd) => cmd,
+                    Err(message) => return CommandResult::Error { message },
+                };
             let wt_path = if let Some(ref key) = checkout_key {
                 providers_data.checkouts.get(key).map(|_| key.clone())
             } else if let Some(branch_name) = &branch {
@@ -349,6 +355,32 @@ pub async fn execute(
             message: "bug: daemon-level command reached per-repo executor".to_string(),
         },
     }
+}
+
+fn session_provider_key<'a>(session: &'a CloudAgentSession, session_id: &str) -> Option<&'a str> {
+    session.correlation_keys.iter().find_map(|k| match k {
+        CorrelationKey::SessionRef(provider, id) if id == session_id => Some(provider.as_str()),
+        _ => None,
+    })
+}
+
+async fn resolve_attach_command(
+    session_id: &str,
+    registry: &ProviderRegistry,
+    providers_data: &ProviderData,
+) -> Result<String, String> {
+    let provider_key = providers_data
+        .sessions
+        .get(session_id)
+        .and_then(|s| session_provider_key(s, session_id))
+        .ok_or_else(|| format!("Cannot determine provider for session {session_id}"))?;
+
+    let ca = registry
+        .coding_agents
+        .get(provider_key)
+        .ok_or_else(|| format!("No coding agent provider: {provider_key}"))?;
+
+    ca.attach_command(session_id).await
 }
 
 /// Build a WorkspaceConfig from repo/branch/dir/command.
@@ -597,18 +629,28 @@ mod tests {
     /// A mock CodingAgent provider.
     struct MockCodingAgent {
         archive_result: tokio::sync::Mutex<Result<(), String>>,
+        attach_command: String,
     }
 
     impl MockCodingAgent {
         fn succeeding() -> Self {
             Self {
                 archive_result: tokio::sync::Mutex::new(Ok(())),
+                attach_command: "mock-attach-cmd".to_string(),
             }
         }
 
         fn failing(msg: &str) -> Self {
             Self {
                 archive_result: tokio::sync::Mutex::new(Err(msg.to_string())),
+                attach_command: "mock-attach-cmd".to_string(),
+            }
+        }
+
+        fn with_attach(attach_command: &str) -> Self {
+            Self {
+                archive_result: tokio::sync::Mutex::new(Ok(())),
+                attach_command: attach_command.to_string(),
             }
         }
     }
@@ -628,8 +670,8 @@ mod tests {
             let result = self.archive_result.lock().await;
             result.clone()
         }
-        async fn attach_command(&self, _session_id: &str) -> Result<String, String> {
-            Ok("claude --attach".to_string())
+        async fn attach_command(&self, session_id: &str) -> Result<String, String> {
+            Ok(format!("{} {session_id}", self.attach_command))
         }
     }
 
@@ -696,13 +738,16 @@ mod tests {
         }
     }
 
-    fn make_session(_id: &str) -> CloudAgentSession {
+    fn make_session_for(provider: &str, id: &str) -> CloudAgentSession {
         CloudAgentSession {
             title: "test session".to_string(),
             status: SessionStatus::Running,
             model: None,
             updated_at: None,
-            correlation_keys: vec![],
+            correlation_keys: vec![CorrelationKey::SessionRef(
+                provider.to_string(),
+                id.to_string(),
+            )],
         }
     }
 
@@ -810,6 +855,35 @@ mod tests {
         let result = run_execute(
             Command::CreateWorkspaceForCheckout {
                 checkout_path: path,
+            },
+            &registry,
+            &data,
+            &runner,
+        )
+        .await;
+
+        assert_ok(result);
+    }
+
+    #[tokio::test]
+    async fn archive_session_uses_provider_from_session_ref() {
+        let mut registry = empty_registry();
+        registry.coding_agents.insert(
+            "claude".to_string(),
+            Arc::new(MockCodingAgent::failing("wrong provider")),
+        );
+        registry.coding_agents.insert(
+            "cursor".to_string(),
+            Arc::new(MockCodingAgent::succeeding()),
+        );
+        let mut data = empty_data();
+        data.sessions
+            .insert("sess-1".to_string(), make_session_for("cursor", "sess-1"));
+        let runner = runner_ok();
+
+        let result = run_execute(
+            Command::ArchiveSession {
+                session_id: "sess-1".to_string(),
             },
             &registry,
             &data,
@@ -1385,7 +1459,7 @@ mod tests {
         let registry = empty_registry();
         let mut data = empty_data();
         data.sessions
-            .insert("sess-1".to_string(), make_session("sess-1"));
+            .insert("sess-1".to_string(), make_session_for("claude", "sess-1"));
         let runner = runner_ok();
 
         let result = run_execute(
@@ -1398,7 +1472,7 @@ mod tests {
         )
         .await;
 
-        assert_error_contains(result, "No coding agent available");
+        assert_error_contains(result, "No coding agent provider: claude");
     }
 
     #[tokio::test]
@@ -1410,7 +1484,7 @@ mod tests {
         );
         let mut data = empty_data();
         data.sessions
-            .insert("sess-1".to_string(), make_session("sess-1"));
+            .insert("sess-1".to_string(), make_session_for("claude", "sess-1"));
         let runner = runner_ok();
 
         let result = run_execute(
@@ -1435,7 +1509,7 @@ mod tests {
         );
         let mut data = empty_data();
         data.sessions
-            .insert("sess-1".to_string(), make_session("sess-1"));
+            .insert("sess-1".to_string(), make_session_for("claude", "sess-1"));
         let runner = runner_ok();
 
         let result = run_execute(
@@ -1591,6 +1665,10 @@ mod tests {
     #[tokio::test]
     async fn teleport_session_with_checkout_key() {
         let mut registry = empty_registry();
+        registry.coding_agents.insert(
+            "claude".to_string(),
+            Arc::new(MockCodingAgent::with_attach("claude --teleport")), // base; mock appends session_id
+        );
         registry.workspace_manager = Some((
             "cmux".to_string(),
             Arc::new(MockWorkspaceManager::succeeding()),
@@ -1599,8 +1677,52 @@ mod tests {
         let path = PathBuf::from("/repo/wt-feat");
         data.checkouts
             .insert(path.clone(), make_checkout("feat", "/repo/wt-feat"));
-        // resolve_claude_path calls runner.exists which returns true for MockRunner
+        data.sessions
+            .insert("sess-1".to_string(), make_session_for("claude", "sess-1"));
         let runner = runner_ok();
+
+        let result = run_execute(
+            Command::TeleportSession {
+                session_id: "sess-1".to_string(),
+                branch: Some("feat".to_string()),
+                checkout_key: Some(path),
+            },
+            &registry,
+            &data,
+            &runner,
+        )
+        .await;
+
+        assert_ok(result);
+    }
+
+    #[tokio::test]
+    async fn teleport_session_uses_provider_specific_attach_command() {
+        let mut registry = empty_registry();
+        registry.coding_agents.insert(
+            "claude".to_string(),
+            Arc::new(MockCodingAgent::with_attach("claude --teleport")),
+        );
+        registry.coding_agents.insert(
+            "cursor".to_string(),
+            Arc::new(MockCodingAgent::with_attach("agent --resume")),
+        );
+        registry.workspace_manager = Some((
+            "cmux".to_string(),
+            Arc::new(MockWorkspaceManager::succeeding()),
+        ));
+        let mut data = empty_data();
+        let path = PathBuf::from("/repo/wt-feat");
+        data.checkouts
+            .insert(path.clone(), make_checkout("feat", "/repo/wt-feat"));
+        data.sessions
+            .insert("sess-1".to_string(), make_session_for("cursor", "sess-1"));
+        let runner = runner_ok();
+
+        let attach = resolve_attach_command("sess-1", &registry, &data)
+            .await
+            .expect("resolve attach command");
+        assert_eq!(attach, "agent --resume sess-1");
 
         let result = run_execute(
             Command::TeleportSession {
@@ -1620,6 +1742,10 @@ mod tests {
     #[tokio::test]
     async fn teleport_session_with_branch_creates_checkout() {
         let mut registry = empty_registry();
+        registry.coding_agents.insert(
+            "claude".to_string(),
+            Arc::new(MockCodingAgent::succeeding()),
+        );
         registry.checkout_managers.insert(
             "wt".to_string(),
             Arc::new(MockCheckoutManager::succeeding("feat", "/repo/wt-feat")),
@@ -1628,7 +1754,9 @@ mod tests {
             "cmux".to_string(),
             Arc::new(MockWorkspaceManager::succeeding()),
         ));
-        let data = empty_data();
+        let mut data = empty_data();
+        data.sessions
+            .insert("sess-1".to_string(), make_session_for("claude", "sess-1"));
         let runner = runner_ok();
 
         let result = run_execute(
@@ -1648,8 +1776,14 @@ mod tests {
 
     #[tokio::test]
     async fn teleport_session_no_path_no_branch() {
-        let registry = empty_registry();
-        let data = empty_data();
+        let mut registry = empty_registry();
+        registry.coding_agents.insert(
+            "claude".to_string(),
+            Arc::new(MockCodingAgent::succeeding()),
+        );
+        let mut data = empty_data();
+        data.sessions
+            .insert("sess-1".to_string(), make_session_for("claude", "sess-1"));
         let runner = runner_ok();
 
         let result = run_execute(
@@ -1670,6 +1804,10 @@ mod tests {
     #[tokio::test]
     async fn teleport_session_ws_manager_fails() {
         let mut registry = empty_registry();
+        registry.coding_agents.insert(
+            "claude".to_string(),
+            Arc::new(MockCodingAgent::succeeding()),
+        );
         registry.workspace_manager = Some((
             "cmux".to_string(),
             Arc::new(MockWorkspaceManager::failing("ws failed")),
@@ -1678,6 +1816,8 @@ mod tests {
         let path = PathBuf::from("/repo/wt-feat");
         data.checkouts
             .insert(path.clone(), make_checkout("feat", "/repo/wt-feat"));
+        data.sessions
+            .insert("sess-1".to_string(), make_session_for("claude", "sess-1"));
         let runner = runner_ok();
 
         let result = run_execute(
@@ -1699,6 +1839,10 @@ mod tests {
     async fn teleport_session_uses_session_as_name_when_no_branch() {
         // When checkout_key is present but branch is None, uses "session" as name.
         let mut registry = empty_registry();
+        registry.coding_agents.insert(
+            "claude".to_string(),
+            Arc::new(MockCodingAgent::succeeding()),
+        );
         registry.workspace_manager = Some((
             "cmux".to_string(),
             Arc::new(MockWorkspaceManager::succeeding()),
@@ -1707,6 +1851,8 @@ mod tests {
         let path = PathBuf::from("/repo/wt-feat");
         data.checkouts
             .insert(path.clone(), make_checkout("feat", "/repo/wt-feat"));
+        data.sessions
+            .insert("sess-1".to_string(), make_session_for("claude", "sess-1"));
         let runner = runner_ok();
 
         let result = run_execute(

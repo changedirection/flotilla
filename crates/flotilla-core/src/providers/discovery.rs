@@ -6,6 +6,7 @@ use crate::config::ConfigStore;
 use crate::providers::ai_utility::claude::ClaudeAiUtility;
 use crate::providers::code_review::github::GitHubCodeReview;
 use crate::providers::coding_agent::claude::ClaudeCodingAgent;
+use crate::providers::coding_agent::cursor::CursorCodingAgent;
 use crate::providers::github_api::GhApiClient;
 use crate::providers::issue_tracker::github::GitHubIssueTracker;
 use crate::providers::registry::ProviderRegistry;
@@ -74,7 +75,7 @@ pub fn extract_repo_slug(url: &str) -> Option<String> {
 /// 1. VCS: check for .git (directory or file — worktrees use a file)
 /// 2. Checkout manager: check for `wt` CLI
 /// 3. Remote host: parse git remote URL -> GitHub/GitLab, check for `gh` CLI
-/// 4. Coding agent: check for `claude` CLI
+/// 4. Coding agents: check for Cursor `agent` and `claude` CLI
 /// 5. AI utility: check for `claude` CLI
 /// 6. Workspace manager: check for cmux binary
 pub async fn detect_providers(
@@ -177,7 +178,21 @@ pub async fn detect_providers(
         // TODO: GitLab support
     }
 
-    // 4. Coding agent & AI utility: claude
+    // 4. Coding agents: Cursor (gate on CURSOR_API_KEY to avoid false positives
+    //    from unrelated binaries also named `agent`)
+    if std::env::var("CURSOR_API_KEY")
+        .map(|v| !v.trim().is_empty())
+        .unwrap_or(false)
+        && runner.exists("agent", &["--version"]).await
+    {
+        registry.coding_agents.insert(
+            "cursor".to_string(),
+            Arc::new(CursorCodingAgent::new("cursor".to_string())),
+        );
+        info!("{repo_name}: Coding agent → Cursor Agents");
+    }
+
+    // 5. Claude coding agent & AI utility
     if let Some(claude_bin) = resolve_claude_path(&*runner).await {
         registry.coding_agents.insert(
             "claude".to_string(),
@@ -647,6 +662,7 @@ mod tests {
                     .on_run("git", &["remote"], Err("no remotes".to_string()))
                     .tool_exists("wt", false)
                     .tool_exists("gh", false)
+                    .tool_exists("agent", false)
                     .tool_exists("claude", has_claude)
                     .build(),
             );
@@ -660,6 +676,62 @@ mod tests {
                 registry.ai_utilities.contains_key("claude"),
                 should_register
             );
+        }
+    }
+
+    #[tokio::test]
+    async fn detect_providers_cursor_registration_depends_on_binary_and_api_key() {
+        // With CURSOR_API_KEY set and agent binary present → registered
+        std::env::set_var("CURSOR_API_KEY", "test-key");
+        {
+            let (dir, repo) = make_repo_with_git_dir();
+            let config = temp_config(&dir);
+            let runner: Arc<dyn CommandRunner> = Arc::new(
+                discovery_runner()
+                    .on_run("git", &["remote"], Err("no remotes".to_string()))
+                    .tool_exists("wt", false)
+                    .tool_exists("gh", false)
+                    .tool_exists("agent", true)
+                    .tool_exists("claude", false)
+                    .build(),
+            );
+            let (registry, _) = detect_providers(&repo, &config, runner).await;
+            assert!(registry.coding_agents.contains_key("cursor"));
+        }
+        std::env::remove_var("CURSOR_API_KEY");
+
+        // Without CURSOR_API_KEY, agent binary alone is not enough
+        {
+            let (dir, repo) = make_repo_with_git_dir();
+            let config = temp_config(&dir);
+            let runner: Arc<dyn CommandRunner> = Arc::new(
+                discovery_runner()
+                    .on_run("git", &["remote"], Err("no remotes".to_string()))
+                    .tool_exists("wt", false)
+                    .tool_exists("gh", false)
+                    .tool_exists("agent", true)
+                    .tool_exists("claude", false)
+                    .build(),
+            );
+            let (registry, _) = detect_providers(&repo, &config, runner).await;
+            assert!(!registry.coding_agents.contains_key("cursor"));
+        }
+
+        // Without agent binary → not registered regardless of env var
+        {
+            let (dir, repo) = make_repo_with_git_dir();
+            let config = temp_config(&dir);
+            let runner: Arc<dyn CommandRunner> = Arc::new(
+                discovery_runner()
+                    .on_run("git", &["remote"], Err("no remotes".to_string()))
+                    .tool_exists("wt", false)
+                    .tool_exists("gh", false)
+                    .tool_exists("agent", false)
+                    .tool_exists("claude", false)
+                    .build(),
+            );
+            let (registry, _) = detect_providers(&repo, &config, runner).await;
+            assert!(!registry.coding_agents.contains_key("cursor"));
         }
     }
 
