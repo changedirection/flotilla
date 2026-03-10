@@ -114,7 +114,10 @@ async fn refresh_providers(
 
     let checkouts_fut = async {
         if let Some(cm) = registry.checkout_managers.values().next() {
-            (cm.display_name().to_string(), cm.list_checkouts(repo_root).await)
+            (
+                cm.display_name().to_string(),
+                cm.list_checkouts(repo_root).await,
+            )
         } else {
             (String::new(), Ok(vec![]))
         }
@@ -122,7 +125,10 @@ async fn refresh_providers(
 
     let cr_fut = async {
         if let Some(cr) = registry.code_review.values().next() {
-            (cr.display_name().to_string(), cr.list_change_requests(repo_root, 20).await)
+            (
+                cr.display_name().to_string(),
+                cr.list_change_requests(repo_root, 20).await,
+            )
         } else {
             (String::new(), Ok(vec![]))
         }
@@ -151,7 +157,10 @@ async fn refresh_providers(
 
     let branches_fut = async {
         if let Some(vcs) = registry.vcs.values().next() {
-            (vcs.display_name().to_string(), vcs.list_remote_branches(repo_root).await)
+            (
+                vcs.display_name().to_string(),
+                vcs.list_remote_branches(repo_root).await,
+            )
         } else {
             (String::new(), Ok(vec![]))
         }
@@ -159,7 +168,10 @@ async fn refresh_providers(
 
     let merged_fut = async {
         if let Some(cr) = registry.code_review.values().next() {
-            (cr.display_name().to_string(), cr.list_merged_branch_names(repo_root, 50).await)
+            (
+                cr.display_name().to_string(),
+                cr.list_merged_branch_names(repo_root, 50).await,
+            )
         } else {
             (String::new(), Ok(vec![]))
         }
@@ -167,7 +179,10 @@ async fn refresh_providers(
 
     let ws_fut = async {
         if let Some((_, ws_mgr)) = &registry.workspace_manager {
-            (ws_mgr.display_name().to_string(), ws_mgr.list_workspaces().await)
+            (
+                ws_mgr.display_name().to_string(),
+                ws_mgr.list_workspaces().await,
+            )
         } else {
             (String::new(), Ok(vec![]))
         }
@@ -297,26 +312,31 @@ fn compute_provider_health(
     errors: &[RefreshError],
 ) -> HashMap<(&'static str, String), bool> {
     let mut health = HashMap::new();
-    if registry.cloud_agents.values().next().is_some() {
-        health.insert(
-            ("cloud_agent", String::new()),
-            !errors.iter().any(|e| e.category == "sessions"),
-        );
+
+    for ca in registry.cloud_agents.values() {
+        let name = ca.display_name().to_string();
+        let has_error = errors
+            .iter()
+            .any(|e| e.category == "sessions" && e.provider == name);
+        health.insert(("cloud_agent", name), !has_error);
     }
-    if registry.code_review.values().next().is_some() {
-        health.insert(
-            ("code_review", String::new()),
-            !errors
-                .iter()
-                .any(|e| e.category == "PRs" || e.category == "merged"),
-        );
+
+    for cr in registry.code_review.values() {
+        let name = cr.display_name().to_string();
+        let has_error = errors
+            .iter()
+            .any(|e| (e.category == "PRs" || e.category == "merged") && e.provider == name);
+        health.insert(("code_review", name), !has_error);
     }
-    if registry.terminal_pool.is_some() {
-        health.insert(
-            ("terminal_pool", String::new()),
-            !errors.iter().any(|e| e.category == "terminals"),
-        );
+
+    if let Some((_, tp)) = &registry.terminal_pool {
+        let name = tp.display_name().to_string();
+        let has_error = errors
+            .iter()
+            .any(|e| e.category == "terminals" && e.provider == name);
+        health.insert(("terminal_pool", name), !has_error);
     }
+
     health
 }
 
@@ -383,6 +403,7 @@ mod tests {
     struct MockCodeReview {
         change_requests_result: Result<Vec<(String, ChangeRequest)>, String>,
         merged_result: Result<Vec<String>, String>,
+        display_name: String,
     }
 
     impl MockCodeReview {
@@ -390,6 +411,7 @@ mod tests {
             Self {
                 change_requests_result: Ok(change_requests),
                 merged_result: Ok(merged_branches),
+                display_name: "MockCR".into(),
             }
         }
 
@@ -397,6 +419,7 @@ mod tests {
             Self {
                 change_requests_result: Err(change_requests_msg.to_string()),
                 merged_result: Err(merged_msg.to_string()),
+                display_name: "MockCR".into(),
             }
         }
     }
@@ -404,7 +427,7 @@ mod tests {
     #[async_trait]
     impl CodeReview for MockCodeReview {
         fn display_name(&self) -> &str {
-            "mock-cr"
+            &self.display_name
         }
 
         async fn list_change_requests(
@@ -438,18 +461,35 @@ mod tests {
 
     struct MockCloudAgent {
         result: Result<Vec<(String, CloudAgentSession)>, String>,
+        display_name: String,
     }
 
     impl MockCloudAgent {
         fn ok(sessions: Vec<(String, CloudAgentSession)>) -> Self {
             Self {
                 result: Ok(sessions),
+                display_name: "MockCA".into(),
+            }
+        }
+
+        fn ok_named(name: &str, sessions: Vec<(String, CloudAgentSession)>) -> Self {
+            Self {
+                result: Ok(sessions),
+                display_name: name.into(),
             }
         }
 
         fn failing(msg: &str) -> Self {
             Self {
                 result: Err(msg.to_string()),
+                display_name: "MockCA".into(),
+            }
+        }
+
+        fn failing_named(name: &str, msg: &str) -> Self {
+            Self {
+                result: Err(msg.to_string()),
+                display_name: name.into(),
             }
         }
     }
@@ -457,7 +497,7 @@ mod tests {
     #[async_trait]
     impl CloudAgentService for MockCloudAgent {
         fn display_name(&self) -> &str {
-            "mock-agent"
+            &self.display_name
         }
 
         async fn list_sessions(
@@ -673,6 +713,14 @@ mod tests {
         assert!(health.is_empty());
     }
 
+    fn refresh_error_for(category: &'static str, provider: &str) -> RefreshError {
+        RefreshError {
+            category,
+            provider: provider.to_string(),
+            message: format!("{category} failure"),
+        }
+    }
+
     #[test]
     fn compute_provider_health_maps_error_categories() {
         let mut registry = ProviderRegistry::new();
@@ -686,12 +734,15 @@ mod tests {
 
         let cases = vec![
             (vec![], true, true),
-            (vec![refresh_error("sessions")], false, true),
-            (vec![refresh_error("PRs")], true, false),
-            (vec![refresh_error("merged")], true, false),
+            (vec![refresh_error_for("sessions", "MockCA")], false, true),
+            (vec![refresh_error_for("PRs", "MockCR")], true, false),
+            (vec![refresh_error_for("merged", "MockCR")], true, false),
             (vec![refresh_error("checkouts")], true, true),
             (
-                vec![refresh_error("sessions"), refresh_error("PRs")],
+                vec![
+                    refresh_error_for("sessions", "MockCA"),
+                    refresh_error_for("PRs", "MockCR"),
+                ],
                 false,
                 false,
             ),
@@ -700,12 +751,14 @@ mod tests {
         for (errors, expected_coding, expected_review) in cases {
             let health = compute_provider_health(&registry, &errors);
             assert_eq!(
-                health.get(&("cloud_agent", String::new())),
-                Some(&expected_coding)
+                health.get(&("cloud_agent", "MockCA".to_string())),
+                Some(&expected_coding),
+                "cloud_agent health mismatch for errors: {errors:?}"
             );
             assert_eq!(
-                health.get(&("code_review", String::new())),
-                Some(&expected_review)
+                health.get(&("code_review", "MockCR".to_string())),
+                Some(&expected_review),
+                "code_review health mismatch for errors: {errors:?}"
             );
         }
     }
@@ -884,7 +937,7 @@ mod tests {
         assert_eq!(
             snapshot
                 .provider_health
-                .get(&("cloud_agent", String::new())),
+                .get(&("cloud_agent", "MockCA".to_string())),
             Some(&false)
         );
     }
@@ -904,5 +957,72 @@ mod tests {
         handle.trigger_refresh();
         let snapshot = wait_for_snapshot(&mut rx).await;
         assert!(snapshot.errors.is_empty());
+    }
+
+    #[test]
+    fn compute_provider_health_per_provider() {
+        let mut registry = ProviderRegistry::new();
+        registry.cloud_agents.insert(
+            "claude".to_string(),
+            Arc::new(MockCloudAgent::ok_named("Claude", vec![])),
+        );
+        registry.cloud_agents.insert(
+            "cursor".to_string(),
+            Arc::new(MockCloudAgent::ok_named("Cursor", vec![])),
+        );
+
+        // Only Cursor fails
+        let errors = vec![RefreshError {
+            category: "sessions",
+            provider: "Cursor".to_string(),
+            message: "auth failed".to_string(),
+        }];
+
+        let health = compute_provider_health(&registry, &errors);
+        assert_eq!(
+            health.get(&("cloud_agent", "Claude".to_string())),
+            Some(&true)
+        );
+        assert_eq!(
+            health.get(&("cloud_agent", "Cursor".to_string())),
+            Some(&false)
+        );
+    }
+
+    #[tokio::test]
+    async fn spawn_with_mixed_provider_health_isolates_failures() {
+        let mut registry = ProviderRegistry::new();
+        registry.cloud_agents.insert(
+            "claude".to_string(),
+            Arc::new(MockCloudAgent::ok_named("Claude", vec![])),
+        );
+        registry.cloud_agents.insert(
+            "cursor".to_string(),
+            Arc::new(MockCloudAgent::failing_named("Cursor", "auth failed")),
+        );
+
+        let handle = RepoRefreshHandle::spawn(
+            repo_root(),
+            Arc::new(registry),
+            criteria(),
+            Duration::from_secs(3600),
+        );
+
+        let mut rx = handle.snapshot_rx.clone();
+        let snapshot = wait_for_snapshot(&mut rx).await;
+
+        assert!(snapshot.errors.iter().any(|e| e.provider == "Cursor"));
+        assert_eq!(
+            snapshot
+                .provider_health
+                .get(&("cloud_agent", "Claude".to_string())),
+            Some(&true)
+        );
+        assert_eq!(
+            snapshot
+                .provider_health
+                .get(&("cloud_agent", "Cursor".to_string())),
+            Some(&false)
+        );
     }
 }

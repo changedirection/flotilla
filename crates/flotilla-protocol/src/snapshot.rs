@@ -186,9 +186,10 @@ mod tests {
                 ("vcs".to_string(), vec!["git".to_string()]),
                 ("code_review".to_string(), vec!["github".to_string()]),
             ]),
-            provider_health: HashMap::from([
-                ("vcs".to_string(), HashMap::from([("Git".to_string(), true)])),
-            ]),
+            provider_health: HashMap::from([(
+                "vcs".to_string(),
+                HashMap::from([("Git".to_string(), true)]),
+            )]),
             loading: true,
         };
         let json = serde_json::to_string(&info).expect("serialize");
@@ -263,9 +264,10 @@ mod tests {
                 },
             ],
             providers: ProviderData::default(),
-            provider_health: HashMap::from([
-                ("vcs".to_string(), HashMap::from([("Git".to_string(), true)])),
-            ]),
+            provider_health: HashMap::from([(
+                "vcs".to_string(),
+                HashMap::from([("Git".to_string(), true)]),
+            )]),
             errors: vec![ProviderError {
                 category: "github".into(),
                 provider: String::new(),

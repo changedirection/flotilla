@@ -270,7 +270,10 @@ mod tests {
             }],
             providers: ProviderData::default(),
             provider_health: HashMap::from([
-                ("vcs".to_string(), HashMap::from([("Git".to_string(), true)])),
+                (
+                    "vcs".to_string(),
+                    HashMap::from([("Git".to_string(), true)]),
+                ),
                 (
                     "code_review".to_string(),
                     HashMap::from([("GitHub".to_string(), false)]),
