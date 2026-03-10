@@ -302,6 +302,21 @@ fn compute_provider_health(
             !errors.iter().any(|e| e.category == "terminals"),
         );
     }
+    if registry.vcs.values().next().is_some() {
+        health.insert("vcs", !errors.iter().any(|e| e.category == "branches"));
+    }
+    if registry.checkout_managers.values().next().is_some() {
+        health.insert(
+            "checkout",
+            !errors.iter().any(|e| e.category == "checkouts"),
+        );
+    }
+    if registry.workspace_manager.is_some() {
+        health.insert(
+            "workspace",
+            !errors.iter().any(|e| e.category == "workspaces"),
+        );
+    }
     health
 }
 
@@ -686,6 +701,44 @@ mod tests {
             assert_eq!(health.get("cloud_agent"), Some(&expected_coding));
             assert_eq!(health.get("code_review"), Some(&expected_review));
         }
+    }
+
+    #[test]
+    fn compute_provider_health_vcs_checkout_workspace() {
+        let mut registry = ProviderRegistry::new();
+        registry
+            .vcs
+            .insert("git".to_string(), Arc::new(MockVcs::ok(vec![])));
+        registry
+            .checkout_managers
+            .insert("wt".to_string(), Arc::new(MockCheckoutManager::ok(vec![])));
+        registry.workspace_manager = Some((
+            "cmux".to_string(),
+            Arc::new(MockWorkspaceManager::ok(vec![])),
+        ));
+
+        // No errors → all healthy
+        let health = compute_provider_health(&registry, &[]);
+        assert_eq!(health.get("vcs"), Some(&true));
+        assert_eq!(health.get("checkout"), Some(&true));
+        assert_eq!(health.get("workspace"), Some(&true));
+
+        // Matching error categories → unhealthy
+        let errors = vec![
+            refresh_error("branches"),
+            refresh_error("checkouts"),
+            refresh_error("workspaces"),
+        ];
+        let health = compute_provider_health(&registry, &errors);
+        assert_eq!(health.get("vcs"), Some(&false));
+        assert_eq!(health.get("checkout"), Some(&false));
+        assert_eq!(health.get("workspace"), Some(&false));
+
+        // Unrelated errors don't affect these providers
+        let health = compute_provider_health(&registry, &[refresh_error("sessions")]);
+        assert_eq!(health.get("vcs"), Some(&true));
+        assert_eq!(health.get("checkout"), Some(&true));
+        assert_eq!(health.get("workspace"), Some(&true));
     }
 
     #[tokio::test]
